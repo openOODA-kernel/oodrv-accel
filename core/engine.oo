@@ -1,0 +1,106 @@
+// # oodrv-accel Core State Machine & Accelerator Descriptor Tracker
+//
+// Logline: Tracks GPU/NPU/CXL/QAT accelerator queues, MMIO/PCI negotiation, and doorbell state.
+// Setup: Declared capability: None. Pure state engine with fail-closed validation.
+// Beats:
+//   1. Declare AccelDrvContext descriptor for GPU compute, NPU systolic, CXL fabric, and QAT offload queues.
+//   2. Initialize bounded state with command ring capacity and capability rights masks.
+//   3. Execute state transition steps, monotonic rights attenuation, and record inspection parsing.
+//   4. Verify structural invariants and admit filesystem observations fail-closed.
+
+type AccelDrvContext = struct {
+    instance_id: Int,
+    cap_mask: Int,
+    capacity: Int,
+    active_items: Int,
+    accel_ops: Int,
+    is_ready: Bool
+};
+
+pub fn accel_bit_and(a: Int, b: Int) -> Int {
+    if a <= 0 || b <= 0 { return 0; }
+    return a & b;
+}
+
+pub fn accel_init(id: Int, mask: Int, cap_limit: Int) -> AccelDrvContext {
+    let safe_id: Int = if id <= 0 { 1 } else { id };
+    let safe_mask: Int = if mask < 0 { 0 } else { mask };
+    let raw_cap: Int = if cap_limit <= 0 { 64 } else { cap_limit };
+    let safe_cap: Int = if raw_cap > 65536 { 65536 } else { raw_cap };
+    return AccelDrvContext {
+        instance_id: safe_id,
+        cap_mask: safe_mask,
+        capacity: safe_cap,
+        active_items: 0,
+        accel_ops: safe_id + safe_cap,
+        is_ready: true
+    };
+}
+
+pub fn accel_step(state: AccelDrvContext, delta: Int, req_mask: Int) -> AccelDrvContext {
+    if state.is_ready == false || delta <= 0 || req_mask <= 0 || state.active_items < 0 {
+        return state;
+    }
+    if accel_bit_and(state.cap_mask, req_mask) != req_mask {
+        return state;
+    }
+    let room: Int = state.capacity - state.active_items;
+    if delta > room {
+        return state;
+    }
+    return AccelDrvContext {
+        instance_id: state.instance_id,
+        cap_mask: state.cap_mask,
+        capacity: state.capacity,
+        active_items: state.active_items + delta,
+        accel_ops: state.accel_ops + delta,
+        is_ready: true
+    };
+}
+
+pub fn accel_verify(state: AccelDrvContext) -> Bool {
+    if state.is_ready == false { return false; }
+    if state.instance_id <= 0 || state.capacity <= 0 { return false; }
+    if state.active_items < 0 || state.active_items > state.capacity { return false; }
+    return state.accel_ops > 0;
+}
+
+pub fn accel_observe(state: AccelDrvContext, count: Int, bytes: Int, req_mask: Int) -> AccelDrvContext {
+    if state.is_ready == false || count <= 0 || bytes < 0 || bytes > 4294967295 || state.active_items < 0 ||
+        req_mask <= 0 {
+        return state;
+    }
+    if accel_bit_and(state.cap_mask, req_mask) != req_mask {
+        return state;
+    }
+    let room: Int = state.capacity - state.active_items;
+    if count > room { return state; }
+    return AccelDrvContext {
+        instance_id: state.instance_id,
+        cap_mask: state.cap_mask,
+        capacity: state.capacity,
+        active_items: state.active_items + count,
+        accel_ops: state.accel_ops + (bytes / 64) + 1,
+        is_ready: true
+    };
+}
+
+pub fn accel_record_parse(dev_id: Int, qidx: Int, desc_id: Int, len_bytes: Int, flags: Int) -> AccelDrvContext {
+    if dev_id <= 0 || qidx < 0 || desc_id < 0 || len_bytes < 0 || flags < 0 || flags > 4294967295 {
+        return AccelDrvContext { instance_id: 0, cap_mask: 0, capacity: 0, active_items: 0, accel_ops: 0, is_ready: false };
+    }
+    return AccelDrvContext {
+        instance_id: dev_id,
+        cap_mask: qidx,
+        capacity: desc_id,
+        active_items: len_bytes,
+        accel_ops: flags + 1,
+        is_ready: true
+    };
+}
+
+pub fn accel_record_desc(rec: AccelDrvContext) -> String {
+    if rec.is_ready == false { return "accel-record: invalid"; }
+    return "Accel descriptor: " + rec.instance_id.to_string() + "," + rec.cap_mask.to_string() + "," +
+        rec.capacity.to_string() + "," + rec.active_items.to_string() + "," + (rec.accel_ops - 1).to_string();
+}

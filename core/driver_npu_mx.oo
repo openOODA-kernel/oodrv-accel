@@ -1,0 +1,159 @@
+// # NPU / TPU Systolic Matrix Engine Driver
+//
+// Logline: INT4/INT8/FP8/BF16 tile descriptor validation, DMA scratchpad bounds, and deterministic cycle-budget accounting.
+// Setup: Declared caps: DmaCap (+GpuCap mask). Q32.32 fixed-point cycle accounting via std/core/math/exact.
+// Beats:
+//   1. Declare NpuTileDesc tile descriptor and NpuSystolicEngine array state for DMA-pinned scratchpad windows.
+//   2. Validate dtype code (1=INT4, 2=INT8, 3=FP8, 4=BF16), tile dims, and scratchpad bounds fail-closed.
+//   3. Account deterministic systolic wave cycles in Q32 fixed-point; refuse work that exceeds the cycle budget.
+//   4. Gate tile submission on a 4-phase OODA turn + checkpoint + warrant + IPC wire frame; drain completions.
+
+import "oostd/core/ooda.oo";
+import "oostd/core/math/exact/fixed_point_q32.oo";
+import "oostd/sec/capreg.oo";
+import "oostd/sec/warrant_grp/warrant.oo";
+import "oostd/sec/attest.oo";
+import "oostd/sec/audit.oo";
+import "oostd/sec/blackbox_grp/blackbox.oo";
+import "oostd/sec/speculate_grp/speculate.oo";
+import "oostd/sec/quorum_grp/quorum.oo";
+import "oostd/sec/delegate_grp/delegate.oo";
+import "oostd/hw/ipc/wire.oo";
+
+type NpuTileDesc = struct {
+    dtype: Int,
+    rows: Int,
+    cols: Int,
+    scratch_phys: Int,
+    len_bytes: Int
+};
+
+type NpuSystolicEngine = struct {
+    array_dim: Int,
+    scratch_base: Int,
+    scratch_size: Int,
+    cycle_budget: Int,
+    cycles_used: Int,
+    inflight: Int,
+    tiles_done: Int,
+    epoch: Int,
+    causal_root: Int
+};
+
+pub fn npu_dtype_ok(dtype: Int) -> Bool {
+    return dtype >= 1 && dtype <= 4;
+}
+
+pub fn npu_dtype_scale(dtype: Int) -> Int {
+    if dtype == 1 { return 4; }
+    if dtype == 2 || dtype == 3 { return 2; }
+    return 1;
+}
+
+pub fn npu_tile_new(dtype: Int, rows: Int, cols: Int, scratch_phys: Int, len: Int) -> NpuTileDesc {
+    return NpuTileDesc {
+        dtype: if npu_dtype_ok(dtype) { dtype } else { 0 },
+        rows: if rows < 1 || rows > 4096 { 0 } else { rows },
+        cols: if cols < 1 || cols > 4096 { 0 } else { cols },
+        scratch_phys: if scratch_phys < 4096 || (scratch_phys % 64) != 0 { 0 } else { scratch_phys },
+        len_bytes: if len <= 0 || len > 16777216 { 0 } else { len }
+    };
+}
+
+pub fn npu_mx_init(_dma: &DmaCap, array_dim: Int, scratch_base: Int, scratch_size: Int,
+    cycle_budget: Int) -> NpuSystolicEngine {
+    let pow2: Bool = array_dim >= 8 && array_dim <= 128 && (array_dim & (array_dim - 1)) == 0;
+    return NpuSystolicEngine {
+        array_dim: if pow2 { array_dim } else { 16 },
+        scratch_base: if scratch_base < 4096 || (scratch_base % 4096) != 0 { 33554432 } else { scratch_base },
+        scratch_size: if scratch_size < 1048576 { 16777216 } else { scratch_size },
+        cycle_budget: if cycle_budget <= 0 { 1048576 } else { cycle_budget },
+        cycles_used: 0,
+        inflight: 0,
+        tiles_done: 0,
+        epoch: 1,
+        causal_root: oo_audit_genesis()
+    };
+}
+
+pub fn npu_mx_tile_cycles(eng: NpuSystolicEngine, td: NpuTileDesc) -> Int {
+    let rw: Int = (td.rows + eng.array_dim - 1) / eng.array_dim;
+    let cw: Int = (td.cols + eng.array_dim - 1) / eng.array_dim;
+    let waves: Q32 = q32_from_int(rw + cw);
+    let dim: Q32 = q32_from_int(eng.array_dim);
+    let scale: Q32 = q32_from_int(npu_dtype_scale(td.dtype));
+    return q32_to_int_nearest(q32_mul(q32_mul(waves, dim), scale));
+}
+
+pub fn npu_mx_submit_tile(eng: NpuSystolicEngine, _dma: &DmaCap, td: NpuTileDesc) -> NpuSystolicEngine {
+    if npu_dtype_ok(td.dtype) == false || td.rows <= 0 || td.cols <= 0 || td.len_bytes <= 0 { return eng; }
+    if td.scratch_phys < eng.scratch_base || td.scratch_phys + td.len_bytes > eng.scratch_base + eng.scratch_size ||
+        eng.inflight < 0 || eng.inflight >= 64 {
+        return eng;
+    }
+    let cost: Int = npu_mx_tile_cycles(eng, td);
+    if cost <= 0 || eng.cycles_used + cost > eng.cycle_budget { return eng; }
+    let caps: Int = (1 << oo_cap_bit_index("GpuCap")) | (1 << oo_cap_bit_index("DmaCap"));
+    let parent_reg64: Int = oo_cap_reg64_pack(eng.epoch, 30, 1, caps);
+    if oo_warrant_check(parent_reg64, eng.epoch, caps, 24) == false { return eng; }
+    let turn: OodaTurn = oo_ooda_cycle(parent_reg64, eng.epoch, 24, caps, 100, td.scratch_phys, td.rows, td.cols,
+        td.dtype, eng.tiles_done + 1, 17, 29);
+    let next_ep: Int = turn.epoch;
+    let child_reg64: Int = oo_cap_reg64_pack(next_ep, 30, 2, caps);
+    let dseal: Int = oo_delegate_seal(eng.causal_root, child_reg64, 24, 17, 29);
+    let d_ok: Bool = oo_delegate_gate(parent_reg64, child_reg64, caps, eng.epoch, next_ep, 24, eng.causal_root, dseal,
+        17, 29);
+    let ckpt: Ckpt = oo_ckpt_new(td.scratch_phys, turn.causal_root, child_reg64);
+    let seal: Int = oo_attest_seal(child_reg64, 24, ckpt.causal_root, 17, 29);
+    let next_root: Int = oo_speculate(ckpt, next_ep, caps, 24, seal, 17, 29, cost);
+    let fr: Wire = oo_wire_decode(oo_wire_encode(7, 24, child_reg64, td.scratch_phys, td.len_bytes, td.dtype, next_ep,
+        next_root));
+    if turn.committed == false || d_ok == false || next_root <= ckpt.causal_root || fr.valid == false {
+        return eng;
+    }
+    return NpuSystolicEngine {
+        array_dim: eng.array_dim,
+        scratch_base: eng.scratch_base,
+        scratch_size: eng.scratch_size,
+        cycle_budget: eng.cycle_budget,
+        cycles_used: eng.cycles_used + cost,
+        inflight: eng.inflight + 1,
+        tiles_done: eng.tiles_done,
+        epoch: next_ep,
+        causal_root: next_root
+    };
+}
+
+pub fn npu_mx_drain(eng: NpuSystolicEngine, _dma: &DmaCap) -> NpuSystolicEngine {
+    if eng.inflight <= 0 { return eng; }
+    return NpuSystolicEngine {
+        array_dim: eng.array_dim,
+        scratch_base: eng.scratch_base,
+        scratch_size: eng.scratch_size,
+        cycle_budget: eng.cycle_budget,
+        cycles_used: eng.cycles_used,
+        inflight: 0,
+        tiles_done: eng.tiles_done + eng.inflight,
+        epoch: eng.epoch,
+        causal_root: oo_audit_link(eng.causal_root, eng.inflight)
+    };
+}
+
+pub fn npu_quorum_blackbox_verify(eng: NpuSystolicEngine, irq_vec: Int) -> Bool {
+    let caps: Int = (1 << oo_cap_bit_index("GpuCap")) | (1 << oo_cap_bit_index("DmaCap"));
+    let vec: Int = if irq_vec < 0 || irq_vec > 255 { 0 } else { irq_vec };
+    let rights: Int = 30 | vec;
+    let v1: Int = oo_cap_reg64_pack(eng.epoch, rights, 1, caps);
+    let v2: Int = oo_cap_reg64_pack(eng.epoch, rights, 2, caps);
+    let v3: Int = oo_cap_reg64_pack(eng.epoch, rights, 3, caps);
+    let mut votes: List[Int] = list_new();
+    votes = list_push(votes, v1);
+    votes = list_push(votes, v2);
+    votes = list_push(votes, v3);
+    let qseal: Int = oo_quorum_seal(v1, 24, eng.causal_root, 17, 29);
+    let q_ok: Bool = oo_quorum_act_gate(votes, 1, v1, eng.epoch, caps, 24, eng.causal_root, qseal, 17, 29);
+    let bb_seal: Int = oo_blackbox_seal(irq_vec, v1, eng.tiles_done + eng.inflight + 1, eng.causal_root, 17, 29);
+    let bb_ok: Bool = oo_blackbox_replay(bb_seal, irq_vec, v1, eng.epoch, caps, eng.tiles_done + eng.inflight + 1,
+        eng.causal_root, 17, 29);
+    return q_ok && bb_ok;
+}

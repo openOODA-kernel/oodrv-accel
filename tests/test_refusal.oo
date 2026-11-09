@@ -1,0 +1,166 @@
+// # oodrv-accel Axis-2 Refusal & Fault-Injection Suite
+//
+// Logline: Fail-closed misalignment, out-of-window, invariants, capability, traversal, malformed, and persona fault assertions.
+// Setup: Imports the root anchor, gate, manifest, state, and evt_dump pages; six capability refs.
+// Beats:
+//   1. Fault-inject GPU/NPU/CXL/QAT descriptor invariants, out-of-BAR bounds, revoked slots, and double-booked key slots.
+//   2. Refuse zero/stale capability registers, traversal paths, malformed manifest records, and over-completions.
+//   3. Refuse missing persona selectors, conflicting verbs, unknown flags, and flag-as-operand saves.
+
+import "anchor.oo";
+import "oostd/fs/os/fs.oo";
+import "core/evt_dump.oo";
+import "core/fs/gate.oo";
+import "core/fs/manifest.oo";
+import "core/fs/state.oo";
+
+fn expect(cond: Bool, label: String) -> Bool {
+    if cond {
+        println("ok " + label);
+        return true;
+    }
+    println("FAIL " + label);
+    return false;
+}
+
+fn check_driver_refusals(gpu: &GpuCap, dma: &DmaCap, mmio: &MmioCap, pci: &PciCap) -> Int {
+    let mut n: Int = 0;
+    let q: GpuComputeQueue = gpu_cmdq_init(gpu, dma, mmio, 16777216, 4096, 268435456, 268435456, 256);
+    let mis: GpuCmdPacket = gpu_packet_new(1, 7, 4128, 8, 8, 1, 3);
+    let zero_m: GpuCmdPacket = gpu_packet_new(1, 7, 269484032, 8, 8, 1, 0);
+    let oob: GpuCmdPacket = gpu_packet_new(1, 7, 4194304, 8, 8, 1, 3);
+    let q1: GpuComputeQueue = gpu_cmdq_submit(q, gpu, dma, mmio, mis);
+    let q2: GpuComputeQueue = gpu_cmdq_submit(q, gpu, dma, mmio, zero_m);
+    let q3: GpuComputeQueue = gpu_cmdq_submit(q, gpu, dma, mmio, oob);
+    if expect(mis.shader_phys == 0 && zero_m.warp_mask == 0 && q1.submitted_pkts == 0 && q2.submitted_pkts == 0 &&
+        q3.submitted_pkts == 0, "01 GPU cmdq refuses misaligned shader, zero warp mask, and out-of-BAR phys") {
+        n = n + 1; }
+    let bop: GpuCmdPacket = gpu_packet_new(0, 0, 269484032, 0, 0, 0, 3);
+    let qc: GpuComputeQueue = gpu_cmdq_init(gpu, dma, mmio, 4096, 0, 0, 0, 3);
+    let qr: GpuComputeQueue = gpu_cmdq_ring_doorbell(q, mmio);
+    if expect(bop.opcode_cid == 1 && bop.wg_dims == 1049601 && qc.queue_size == 256 && qc.vram_base == 268435456 &&
+        qr.doorbell_rings == 0 && qr.tail == 0,
+        "02 invalid opcode/dims clamp, undersized queue normalizes to 256, doorbell on empty ring refuses") {
+        n = n + 1; }
+    let e: NpuSystolicEngine = npu_mx_init(dma, 16, 33554432, 16777216, 1048576);
+    let eb: NpuSystolicEngine = npu_mx_init(dma, 16, 33554432, 16777216, 32);
+    let td_bad: NpuTileDesc = npu_tile_new(9, 16, 16, 33554432, 4096);
+    let td_zero: NpuTileDesc = npu_tile_new(2, 0, 16, 33554432, 4096);
+    let td_oob: NpuTileDesc = npu_tile_new(2, 16, 16, 268435456, 4096);
+    let td: NpuTileDesc = npu_tile_new(2, 16, 16, 33554432, 4096);
+    if expect(td_bad.dtype == 0 && td_zero.rows == 0 && npu_mx_submit_tile(e, dma, td_bad).inflight == 0 &&
+        npu_mx_submit_tile(e, dma, td_zero).inflight == 0 && npu_mx_submit_tile(e, dma, td_oob).inflight == 0 &&
+        npu_mx_submit_tile(eb, dma, td).inflight == 0,
+        "03 NPU refuses bad dtype, zero dims, out-of-scratchpad tile, and over-budget cycle cost") { n = n + 1; }
+    let dc: CxlFabricDevice = cxl_dev_init(pci, dma, 0, 9, 1000, 1000);
+    let dw: CxlHdmWindow = cxl_window_new(4096, 4096, 1);
+    let w_oob: CxlHdmWindow = cxl_window_new(1073741824, 268435456, 1);
+    let d0: CxlFabricDevice = cxl_dev_init(pci, dma, 0, 2, 536870912, 268435456);
+    let dmap: CxlFabricDevice = cxl_map_window(d0, pci, w_oob, 0);
+    if expect(dc.dev_type == 3 && dw.hdm_base == 0 && dmap.window_mask == 0 && cxl_map_window(d0, pci, dw, 9).window_mask == 0,
+        "04 CXL refuses non-256MiB-aligned HDM base, bad type normalizes, out-of-decoder window, slot>7") { n = n + 1; }
+    let w0: CxlHdmWindow = cxl_window_new(536870912, 268435456, 1);
+    let d1: CxlFabricDevice = cxl_map_window(d0, pci, w0, 0);
+    let dr: CxlFabricDevice = cxl_revoke_cap(d1, 0);
+    let drm: CxlFabricDevice = cxl_map_window(dr, pci, w0, 0);
+    let dp: CxlFabricDevice = cxl_peer_dma(d1, dma, 2048, 537919488, 4096);
+    if expect(dr.revoked_mask == 1 && drm.window_mask == 0 && dp.peer_dmas == 0 &&
+        cxl_revoke_cap(d0, 1).cap_epoch == 1 && cxl_revoke_cap(d1, 9).cap_epoch == 1,
+        "05 CXL refuses peer-DMA outside HDM, re-map of revoked slot, and revoke of unmapped/bad slot") { n = n + 1; }
+    let r0: QatAccelRing = qat_ring_init(dma, 50331648, 64);
+    let qd: QatRingDesc = qat_desc_new(5, 50593792, 50597888, 1024, 3);
+    let bad_op: QatRingDesc = qat_desc_new(9, 50593792, 50597888, 1024, 3);
+    let bad_slot: QatRingDesc = qat_desc_new(5, 50593792, 50597888, 1024, 8);
+    let r1: QatAccelRing = qat_submit(r0, dma, qd);
+    let r2: QatAccelRing = qat_submit(r1, dma, qd);
+    if expect(bad_op.op == 0 && bad_slot.key_slot == 0 && qat_submit(r0, dma, bad_op).tail == 0 &&
+        r2.tail == 1 && r2.inflight_slots == 8 && qat_complete(r0, dma, 3).ops_done == 0,
+        "06 QAT refuses bad op, slot>7, double-booked key slot, and completion of a free slot") { n = n + 1; }
+    return n;
+}
+
+fn check_engine_refusals() -> Int {
+    let mut n: Int = 0;
+    let st: AccelDrvContext = accel_init(1, 24576, 128);
+    if expect(accel_step(st, 0, 8192).active_items == 0 && accel_step(st, -1, 8192).active_items == 0 &&
+        accel_step(st, 999, 999).active_items == 0 && accel_step(st, 1, 8192).active_items > 0,
+        "07 accel_step refuses zero/negative deltas and capability-mask mismatches") { n = n + 1; }
+    if expect(accel_observe(st, 0, 8, 8192).active_items == 0 &&
+        accel_observe(st, 999, 8, 8192).active_items == 0 &&
+        accel_observe(st, 4, 4294967296, 8192).active_items == 0 && accel_observe(st, 1, 8, 8192).active_items > 0,
+        "08 accel_observe refuses zero counts, capacity storms, and oversized byte counts") { n = n + 1; }
+    if expect(accel_record_parse(0, 1, 2, 3, 4).is_ready == false &&
+        accel_record_parse(1, 2, 3, 4, 4294967296).is_ready == false,
+        "09 malformed record_parse refuses a zero device id and an oversized flags word") { n = n + 1; }
+    if expect(accel_record_desc(accel_record_parse(9, 9, 9, 9, 9)) == "Accel descriptor: 9,9,9,9,9",
+        "10 valid record_parse round-trips the five-field descriptor") { n = n + 1; }
+    return n;
+}
+
+fn check_cap_and_path_refusals(fs_r: &FsReadCap, fs_w: &FsWriteCap) -> Int {
+    let mut n: Int = 0;
+    if expect(oo_cap_reg64_check(0, 1, 3, (1 << oo_cap_bit_index("FsReadCap"))) == false,
+        "11 zero capability register fails closed") { n = n + 1; }
+    let stale: Int = oo_cap_reg64_pack(1, 3, 1, (1 << oo_cap_bit_index("FsReadCap")));
+    let ev_bad: AccelEvtRecovery = accel_evtdump_recover(1, 0, 4099, 2);
+    if expect(oo_cap_reg64_check(stale, 9, 3, (1 << oo_cap_bit_index("FsReadCap"))) == false &&
+        ev_bad.admitted == false && ev_bad.digest == 0,
+        "12 stale epoch and zero-register evtdump recoveries fail closed") { n = n + 1; }
+    let up: String = "." + ".";
+    let bad_s: String = "/tmp/" + up + "/etc/x.oot";
+    let bad_m: String = "/tmp/" + up + "/etc/m.txt";
+    if expect(kstate_write(fs_w, bad_s, "x", "1") != 0 &&
+        accel_manifest_load(fs_r, bad_m).code == 23 &&
+        accel_manifest_load(fs_r, "/tmp/oodrv_no_such_file_xyz").code == 20,
+        "13 traversal state path refused and manifest traversal/missing-path fail closed") { n = n + 1; }
+    let w_err: Bool = fs_write_file(fs_w, "/tmp/oodrv_accel_bad.txt", "not a record\n").is_err();
+    if expect(w_err == false && accel_manifest_load(fs_r, "/tmp/oodrv_accel_bad.txt").code == 22 &&
+        kstate_write(fs_w, "", "x", "1") != 0,
+        "14 malformed manifest record and empty snapshot path fail closed") { n = n + 1; }
+    return n;
+}
+
+fn check_persona_refusals() -> Int {
+    let mut n: Int = 0;
+    let mut a0: List[String] = list_new();
+    a0 = list_push(a0, "--persona");
+    a0 = list_push(a0, "--json");
+    let d_eq: PersonaDispatch = persona_resolve("oodrv-accel", a0);
+    let mut a1: List[String] = list_new();
+    a1 = list_push(a1, "--persona=oodrv-gpu");
+    let d_peq: PersonaDispatch = persona_resolve("oodrv-accel", a1);
+    let mut a2: List[String] = list_new();
+    a2 = list_push(a2, "--list-personas");
+    let d_ls: PersonaDispatch = persona_resolve("oodrv-accel", a2);
+    if expect(d_eq.action == "usage" && d_peq.action == "usage" && d_ls.action == "usage",
+        "15 missing --persona, --persona=name, and --list-personas are usage faults") { n = n + 1; }
+    let mut a3: List[String] = list_new();
+    a3 = list_push(a3, "status");
+    a3 = list_push(a3, "verify");
+    let d_multi: PersonaDispatch = persona_resolve("oodrv-accel", a3);
+    let mut a4: List[String] = list_new();
+    a4 = list_push(a4, "--bogus");
+    let d_flag: PersonaDispatch = persona_resolve("oodrv-accel", a4);
+    let mut a5: List[String] = list_new();
+    a5 = list_push(a5, "--save");
+    a5 = list_push(a5, "--json");
+    let d_sv: PersonaDispatch = persona_resolve("oodrv-accel", a5);
+    if expect(d_multi.action == "error" && d_flag.action == "error" && d_sv.action == "error",
+        "16 conflicting verbs, unknown flags, and flag-as-operand saves fail closed") { n = n + 1; }
+    return n;
+}
+
+pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap,
+    _args: List[String]) -> Result[Int, String] {
+    let mut passed: Int = 0;
+    passed = passed + check_driver_refusals(gpu, dma, mmio, pci);
+    passed = passed + check_engine_refusals();
+    passed = passed + check_cap_and_path_refusals(fs_r, fs_w);
+    passed = passed + check_persona_refusals();
+    if passed != 16 {
+        println("FAIL: " + passed.to_string() + "/16 assertions");
+        return Err("verification failed");
+    }
+    println("PASS: 16/16 assertions");
+    return Ok(0);
+}

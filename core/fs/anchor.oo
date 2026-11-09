@@ -1,0 +1,13 @@
+// # oodrv-accel Core Filesystem Anchor
+//
+// Logline: Re-exports the CWE-22 path admission gate, capability-gated filesystem
+//   probe, accelerator manifest reader, and kernel state store pages.
+// Setup: Pure subsystem anchor shim for oodrv-accel core/fs pages.
+// Beats:
+//   1. Export the traversal and metacharacter path admission gate.
+//   2. Export the FsReadCap probe, manifest reader, and FsWriteCap state store.
+
+import "gate.oo";
+import "fsprobe.oo";
+import "manifest.oo";
+import "state.oo";

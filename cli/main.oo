@@ -1,0 +1,179 @@
+// # oodrv-accel CLI & Self-Test Entrypoint
+//
+// Logline: Multi-call CLI driver; GPU cmd queue, NPU systolic, CXL fabric, and PQ/QAT offload self-test.
+// Setup: Declared caps: FsReadCap, FsWriteCap, DmaCap, MmioCap, GpuCap, PciCap. Imports std/core, std/sec/*, std/ipc.
+// Beats:
+//   1. Resolve the persona from argv[0] or a leading persona subcommand.
+//   2. Run the GPU command queue/doorbell, NPU systolic tile, CXL peer-DMA, and QAT ring self-test.
+//   3. Emit deterministic human or JSON verification results.
+
+import "anchor.oo";
+import "cli/about.oo";
+import "cli/ootheme.oo";
+import "core/fs/fsprobe.oo";
+import "core/fs/manifest.oo";
+import "core/fs/state.oo";
+import "core/fs/gate.oo";
+
+fn run_accel_selftest(gpu: &GpuCap, dma: &DmaCap, mmio: &MmioCap, pci: &PciCap) -> Bool {
+    let st0: AccelDrvContext = accel_init(1, 24576, 128);
+    if accel_verify(st0) == false { return false; }
+    let st1: AccelDrvContext = accel_step(st0, 8, 8192);
+    if st1.active_items != 8 { return false; }
+    let q0: GpuComputeQueue = gpu_cmdq_init(gpu, dma, mmio, 16777216, 4096, 268435456, 268435456, 256);
+    let pkt: GpuCmdPacket = gpu_packet_new(1, 7, 269484032, 8, 8, 1, 4294967295);
+    if gpu_vram_in_bar(q0, pkt.shader_phys, 4096) == false { return false; }
+    let q1: GpuComputeQueue = gpu_cmdq_submit(q0, gpu, dma, mmio, pkt);
+    let q2: GpuComputeQueue = gpu_cmdq_ring_doorbell(q1, mmio);
+    let q3: GpuComputeQueue = gpu_cmdq_complete(q2, dma, 1);
+    if q3.submitted_pkts != 1 || q3.doorbell_rings != 1 || q3.completed_pkts != 1 ||
+        gpu_quorum_blackbox_verify(q3, 57) == false { return false; }
+    let e0: NpuSystolicEngine = npu_mx_init(dma, 16, 33554432, 16777216, 1048576);
+    let td: NpuTileDesc = npu_tile_new(2, 16, 16, 33554432, 4096);
+    let e1: NpuSystolicEngine = npu_mx_submit_tile(e0, dma, td);
+    let e2: NpuSystolicEngine = npu_mx_drain(e1, dma);
+    if e1.inflight != 1 || e2.tiles_done != 1 || npu_quorum_blackbox_verify(e2, 58) == false { return false; }
+    let d0: CxlFabricDevice = cxl_dev_init(pci, dma, 0, 2, 536870912, 268435456);
+    let w0: CxlHdmWindow = cxl_window_new(536870912, 268435456, 1);
+    let d1: CxlFabricDevice = cxl_map_window(d0, pci, w0, 0);
+    let d2: CxlFabricDevice = cxl_peer_dma(d1, dma, 536870912, 537919488, 4096);
+    let d3: CxlFabricDevice = cxl_revoke_cap(d2, 0);
+    if d1.window_mask != 1 || d2.peer_dmas != 1 || d3.revoked_mask != 1 ||
+        cxl_quorum_blackbox_verify(d3, 59) == false { return false; }
+    let r0: QatAccelRing = qat_ring_init(dma, 50331648, 64);
+    let qd: QatRingDesc = qat_desc_new(5, 50593792, 50597888, 1024, 3);
+    let r1: QatAccelRing = qat_submit(r0, dma, qd);
+    let r2: QatAccelRing = qat_complete(r1, dma, 3);
+    if r1.inflight_slots != 8 || r2.ops_done != 1 || qat_keyslot_isolated(r2, 3) == false ||
+        qat_quorum_blackbox_verify(r2, 60) == false { return false; }
+    let td2: OoThemePalette = ootheme_resolve("ooda-dark");
+    if ootheme_verify(td2) == false || ootheme_verify(ootheme_resolve("ooda-light")) == false { return false; }
+    if ootheme_verify(ootheme_resolve("1982")) == false ||
+        ootheme_verify(ootheme_resolve("high-contrast")) == false { return false; }
+    if ootheme_verify(ootheme_resolve("no-color")) == false || ootheme_known("bogus-theme") { return false; }
+    return ootheme_tui_frame(td2, "oodrv-accel", "0.6.1", "kernel", "PASS") == ootheme_tui_frame(td2, "oodrv-accel",
+        "0.6.1", "kernel", "PASS") && ootheme_json(td2) == ootheme_json(td2);
+}
+
+fn run_manifest_mode(fs_r: &FsReadCap, p: Persona, mpath: String, mode: String) -> Result[Int, String] {
+    let m: AccelManifest = accel_manifest_load(fs_r, mpath);
+    if m.code != 0 { println("ERR: " + p.name + " manifest " + mpath + " code=" + m.code.to_string());
+    return Ok(1);
+    }
+    if mode == "json" { println(persona_json(p, m.count));
+    return Ok(0);
+    }
+    if mode == "verify" { println(p.name + " " + p.version + ": verify OK (manifest " + m.count.to_string() + " records)");
+    return Ok(0);
+    }
+    if mode == "inspect" {
+        println(persona_json(p, m.count));
+        let mut ri: Int = 0;
+        while ri < m.count {
+            println(accel_record_desc(list_get(m.records, ri)));
+            ri = ri + 1;
+        }
+        println(p.name + " manifest " + mpath + " records=" + m.count.to_string() + " ok");
+        return Ok(0);
+    }
+    println(p.name + " " + p.version + ": manifest " + mpath + " records=" + m.count.to_string() + " ok");
+    return Ok(0);
+}
+
+fn run_inspect_mode(fs_r: &FsReadCap, p: Persona, operand: String) -> Result[Int, String] {
+    let rec: AccelDrvContext = accel_record_parse(1, 2, 3, 4, 5);
+    println(persona_json(p, p.active));
+    println(accel_record_desc(rec));
+    let target: String = if chars_len(operand) == 0 { accel_fs_default_path() } else { operand };
+    let probe: AccelFsProbe = accel_fs_probe(fs_r, target);
+    println(accel_fs_render(probe));
+    println(accel_fs_json(probe));
+    let observed: Int = probe.entry_count + probe.line_count;
+    let seen: AccelDrvContext = accel_observe(accel_init(1, 24576, 65536), observed, probe.read_len, 8192);
+    println("observed_items=" + seen.active_items.to_string());
+    return Ok(0);
+}
+
+fn accel_has_flag(args: List[String], flag: String) -> Bool {
+    let mut i: Int = 0;
+    while i < list_len(args) {
+        if list_get(args, i) == flag { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn run_theme_mode(p: Persona, operand: String, args: List[String]) -> Result[Int, String] {
+    let tname: String = if chars_len(operand) == 0 { "ooda-dark" } else { operand };
+    if ootheme_known(tname) == false { println("ERR " + p.name + ": unknown theme " + tname);
+    return Err("unknown theme");
+    }
+    let pal: OoThemePalette = ootheme_resolve(tname);
+    if accel_has_flag(args, "--json") { println(ootheme_json(pal));
+    return Ok(0);
+    }
+    println(ootheme_tui_frame(pal, p.name, p.version, p.layer, "PASS"));
+    return Ok(0);
+}
+
+fn run_load_mode(fs_r: &FsReadCap, p: Persona, operand: String) -> Result[Int, String] {
+    if chars_len(operand) == 0 { println("ERR " + p.name + ": load needs a path operand");
+    return Err("missing operand");
+    }
+    let loaded: AccelFsProbe = accel_fs_load(fs_r, operand);
+    if loaded.kind != "file" { println("ERR " + p.name + ": not a readable file " + operand);
+    return Err("not a readable file");
+    }
+    println(accel_fs_render(loaded));
+    println(loaded.content);
+    return Ok(0);
+}
+
+pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap,
+    args: List[String]) -> Result[Int, String] {
+    if oodrv_accel_args_refused(args) { return oodrv_accel_refuse_traversal(); }
+    let argv0: String = "oodrv-accel";
+    let disp: PersonaDispatch = persona_resolve(argv0, args);
+    if disp.action == "error" {
+        println("ERR: " + disp.persona.name + ": " + disp.message + " (fail closed)");
+        return Ok(2);
+    }
+    if disp.action == "usage" {
+        println("ERR: " + disp.persona.name + ": " + disp.message + " (usage fault)");
+        return Ok(2);
+    }
+    let p: Persona = disp.persona;
+    let mode: String = disp.mode;
+    if mode == "about" { return persona_about_mode(p, args);
+    }
+    if chars_len(disp.savepath) > 0 { return kstate_save(fs_w, fs_r, p.name, p.version, disp.savepath); }
+    if mode == "help" {
+        println(p.name + " " + p.version + " - " + p.desc);
+        println("usage: " + p.name + " " + p.usage_tail);
+        return Ok(0);
+    }
+    if mode == "version" { println(p.name + " " + p.version);
+    return Ok(0);
+    }
+    if run_accel_selftest(gpu, dma, mmio, pci) == false { println("FAIL: " + p.name + " self-test failed");
+    return Ok(1);
+    }
+    if chars_len(disp.manifest) > 0 { return run_manifest_mode(fs_r, p, disp.manifest, mode); }
+    if mode == "json" { println(persona_json(p, p.active));
+    return Ok(0);
+    }
+    if mode == "status" { println(p.name + " " + p.version + ": PASS (" + p.desc + ")");
+    return Ok(0);
+    }
+    if mode == "verify" { println(p.name + " " + p.version + ": verify OK (gpu_cmdq+npu_mx+cxl_fabric+pq_qat)");
+    return Ok(0);
+    }
+    if mode == "inspect" { return run_inspect_mode(fs_r, p, disp.operand); }
+    if mode == "load" { return run_load_mode(fs_r, p, disp.operand); }
+    if mode == "theme" || mode == "tui" { return run_theme_mode(p, disp.operand, args); }
+    if mode == "selftest" { println(p.name + " " + p.version + ": PASS (self-test)");
+    return Ok(0);
+    }
+    println(p.name + " " + p.version + ": PASS (" + p.desc + ")");
+    return Ok(0);
+}

@@ -1,0 +1,8 @@
+dist/
+.ooda-cache/
+.blackbox/
+*.tmp.c
+*.protos.c
+*.tu.c
+*.bin
+bin/

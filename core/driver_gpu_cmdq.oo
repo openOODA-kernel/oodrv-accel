@@ -1,0 +1,182 @@
+// # GPU Compute Command Queue & MMIO Doorbell Ring Driver
+//
+// Logline: CUDA / ROCm / Vulkan-Compute usermode submission queue with warp/wavefront capability mask validation and VRAM BAR aperture bounds guard.
+// Setup: Declared caps: GpuCap, DmaCap, MmioCap. Imports std/core/ooda.oo, std/sec/*, std/hw/ipc/wire.oo.
+// Beats:
+//   1. Declare GpuCmdPacket command descriptor and GpuComputeQueue ring structures for IOMMU-pinned GPU queues.
+//   2. Initialize command ring + BAR0 doorbell under &GpuCap, &DmaCap, and &MmioCap with VRAM aperture bounds.
+//   3. Gate packet submission on a 4-phase OODA turn + checkpoint + warrant + IPC wire frame.
+//   4. Ring the MMIO doorbell, consume fence completions, and verify quorum/blackbox flight-recorder traces.
+
+import "oostd/core/ooda.oo";
+import "oostd/sec/capreg.oo";
+import "oostd/sec/warrant_grp/warrant.oo";
+import "oostd/sec/attest.oo";
+import "oostd/sec/audit.oo";
+import "oostd/sec/blackbox_grp/blackbox.oo";
+import "oostd/sec/speculate_grp/speculate.oo";
+import "oostd/sec/quorum_grp/quorum.oo";
+import "oostd/sec/delegate_grp/delegate.oo";
+import "oostd/hw/ipc/wire.oo";
+
+type GpuCmdPacket = struct {
+    opcode_cid: Int,
+    shader_phys: Int,
+    wg_dims: Int,
+    warp_mask: Int
+};
+
+type GpuComputeQueue = struct {
+    qid: Int,
+    ring_phys: Int,
+    doorbell_mmio: Int,
+    vram_base: Int,
+    vram_aperture: Int,
+    queue_size: Int,
+    head: Int,
+    tail: Int,
+    doorbell_rings: Int,
+    epoch: Int,
+    causal_root: Int,
+    submitted_pkts: Int,
+    completed_pkts: Int
+};
+
+pub fn gpu_packet_new(opcode: Int, cid: Int, shader_phys: Int, wg_x: Int, wg_y: Int, wg_z: Int,
+    warp_mask: Int) -> GpuCmdPacket {
+    let safe_op: Int = if opcode < 1 || opcode > 3 { 1 } else { opcode };
+    let safe_cid: Int = if cid < 0 || cid > 65535 { 0 } else { cid };
+    let sx: Int = if wg_x < 1 || wg_x > 1023 { 1 } else { wg_x };
+    let sy: Int = if wg_y < 1 || wg_y > 1023 { 1 } else { wg_y };
+    let sz: Int = if wg_z < 1 || wg_z > 1023 { 1 } else { wg_z };
+    return GpuCmdPacket {
+        opcode_cid: (safe_cid * 65536) + safe_op,
+        shader_phys: if shader_phys < 4096 || (shader_phys % 64) != 0 { 0 } else { shader_phys },
+        wg_dims: (sz << 20) | (sy << 10) | sx,
+        warp_mask: if warp_mask <= 0 || warp_mask > 4611686018427387903 { 0 } else { warp_mask }
+    };
+}
+
+pub fn gpu_cmdq_init(_gpu: &GpuCap, _dma: &DmaCap, _mmio: &MmioCap, ring_phys: Int, doorbell_mmio: Int,
+    vram_base: Int, vram_aperture: Int, qsize: Int) -> GpuComputeQueue {
+    return GpuComputeQueue {
+        qid: 0,
+        ring_phys: if ring_phys < 4096 || (ring_phys % 4096) != 0 { 16777216 } else { ring_phys },
+        doorbell_mmio: if doorbell_mmio < 4 || (doorbell_mmio % 4) != 0 { 4096 } else { doorbell_mmio },
+        vram_base: if vram_base < 4096 || (vram_base % 4096) != 0 { 268435456 } else { vram_base },
+        vram_aperture: if vram_aperture < 4194304 { 268435456 } else { vram_aperture },
+        queue_size: if qsize <= 1 || qsize > 1024 || (qsize & (qsize - 1)) != 0 { 256 } else { qsize },
+        head: 0,
+        tail: 0,
+        doorbell_rings: 0,
+        epoch: 1,
+        causal_root: oo_audit_genesis(),
+        submitted_pkts: 0,
+        completed_pkts: 0
+    };
+}
+
+pub fn gpu_vram_in_bar(q: GpuComputeQueue, phys: Int, len: Int) -> Bool {
+    if len <= 0 || phys < q.vram_base { return false; }
+    return phys + len <= q.vram_base + q.vram_aperture;
+}
+
+pub fn gpu_cmdq_submit(q: GpuComputeQueue, _gpu: &GpuCap, _dma: &DmaCap, _mmio: &MmioCap,
+    pkt: GpuCmdPacket) -> GpuComputeQueue {
+    if q.queue_size <= 0 || q.tail < 0 || q.tail >= q.queue_size { return q; }
+    if q.submitted_pkts < 0 || q.completed_pkts < 0 { return q; }
+    if q.submitted_pkts - q.completed_pkts >= q.queue_size { return q; }
+    if pkt.shader_phys <= 0 || pkt.warp_mask <= 0 { return q; }
+    if gpu_vram_in_bar(q, pkt.shader_phys, 4096) == false { return q; }
+    let caps: Int = (1 << oo_cap_bit_index("GpuCap")) | (1 << oo_cap_bit_index("DmaCap")) |
+        (1 << oo_cap_bit_index("MmioCap"));
+    let parent_reg64: Int = oo_cap_reg64_pack(q.epoch, 30, 1, caps);
+    if oo_warrant_check(parent_reg64, q.epoch, caps, 24) == false { return q; }
+    let turn: OodaTurn = oo_ooda_cycle(parent_reg64, q.epoch, 24, caps, 100, pkt.shader_phys, pkt.opcode_cid,
+        pkt.wg_dims, pkt.warp_mask, q.submitted_pkts + 1, 17, 29);
+    let next_ep: Int = turn.epoch;
+    let child_reg64: Int = oo_cap_reg64_pack(next_ep, 30, 2, caps);
+    let dseal: Int = oo_delegate_seal(q.causal_root, child_reg64, 24, 17, 29);
+    let d_ok: Bool = oo_delegate_gate(parent_reg64, child_reg64, caps, q.epoch, next_ep, 24, q.causal_root, dseal, 17, 29);
+    let ckpt: Ckpt = oo_ckpt_new(pkt.shader_phys, turn.causal_root, child_reg64);
+    let seal: Int = oo_attest_seal(child_reg64, 24, ckpt.causal_root, 17, 29);
+    let next_root: Int = oo_speculate(ckpt, next_ep, caps, 24, seal, 17, 29, pkt.wg_dims);
+    let fr: Wire = oo_wire_decode(oo_wire_encode(6, 24, child_reg64, pkt.shader_phys, pkt.wg_dims, q.qid, next_ep,
+        next_root));
+    if turn.committed == false || d_ok == false || next_root <= ckpt.causal_root || fr.valid == false {
+        return q;
+    }
+    return GpuComputeQueue {
+        qid: q.qid,
+        ring_phys: q.ring_phys,
+        doorbell_mmio: q.doorbell_mmio,
+        vram_base: q.vram_base,
+        vram_aperture: q.vram_aperture,
+        queue_size: q.queue_size,
+        head: q.head,
+        tail: (q.tail + 1) % q.queue_size,
+        doorbell_rings: q.doorbell_rings,
+        epoch: next_ep,
+        causal_root: next_root,
+        submitted_pkts: q.submitted_pkts + 1,
+        completed_pkts: q.completed_pkts
+    };
+}
+
+pub fn gpu_cmdq_ring_doorbell(q: GpuComputeQueue, _mmio: &MmioCap) -> GpuComputeQueue {
+    if q.submitted_pkts - q.completed_pkts <= 0 { return q; }
+    return GpuComputeQueue {
+        qid: q.qid,
+        ring_phys: q.ring_phys,
+        doorbell_mmio: q.doorbell_mmio,
+        vram_base: q.vram_base,
+        vram_aperture: q.vram_aperture,
+        queue_size: q.queue_size,
+        head: q.head,
+        tail: q.tail,
+        doorbell_rings: q.doorbell_rings + 1,
+        epoch: q.epoch,
+        causal_root: oo_audit_link(q.causal_root, q.tail + 1),
+        submitted_pkts: q.submitted_pkts,
+        completed_pkts: q.completed_pkts
+    };
+}
+
+pub fn gpu_cmdq_complete(q: GpuComputeQueue, _dma: &DmaCap, fence_val: Int) -> GpuComputeQueue {
+    if fence_val <= 0 || q.completed_pkts >= q.submitted_pkts { return q; }
+    return GpuComputeQueue {
+        qid: q.qid,
+        ring_phys: q.ring_phys,
+        doorbell_mmio: q.doorbell_mmio,
+        vram_base: q.vram_base,
+        vram_aperture: q.vram_aperture,
+        queue_size: q.queue_size,
+        head: (q.head + 1) % q.queue_size,
+        tail: q.tail,
+        doorbell_rings: q.doorbell_rings,
+        epoch: q.epoch,
+        causal_root: oo_audit_link(q.causal_root, fence_val),
+        submitted_pkts: q.submitted_pkts,
+        completed_pkts: q.completed_pkts + 1
+    };
+}
+
+pub fn gpu_quorum_blackbox_verify(q: GpuComputeQueue, irq_vec: Int) -> Bool {
+    let caps: Int = (1 << oo_cap_bit_index("GpuCap")) | (1 << oo_cap_bit_index("DmaCap")) |
+        (1 << oo_cap_bit_index("MmioCap"));
+    let vec: Int = if irq_vec < 0 || irq_vec > 255 { 0 } else { irq_vec };
+    let rights: Int = 30 | vec;
+    let v1: Int = oo_cap_reg64_pack(q.epoch, rights, 1, caps);
+    let v2: Int = oo_cap_reg64_pack(q.epoch, rights, 2, caps);
+    let v3: Int = oo_cap_reg64_pack(q.epoch, rights, 3, caps);
+    let mut votes: List[Int] = list_new();
+    votes = list_push(votes, v1);
+    votes = list_push(votes, v2);
+    votes = list_push(votes, v3);
+    let qseal: Int = oo_quorum_seal(v1, 24, q.causal_root, 17, 29);
+    let q_ok: Bool = oo_quorum_act_gate(votes, 1, v1, q.epoch, caps, 24, q.causal_root, qseal, 17, 29);
+    let bb_seal: Int = oo_blackbox_seal(irq_vec, v1, q.submitted_pkts + q.completed_pkts + 1, q.causal_root, 17, 29);
+    let bb_ok: Bool = oo_blackbox_replay(bb_seal, irq_vec, v1, q.epoch, caps, q.submitted_pkts + q.completed_pkts + 1,
+        q.causal_root, 17, 29);
+    return q_ok && bb_ok;
+}

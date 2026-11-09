@@ -1,0 +1,14 @@
+// # oodrv-accel Core Subsystem Anchor
+//
+// Logline: Re-exports GPU compute command queue/doorbell, NPU systolic matrix, CXL coherent fabric, and PQ/QAT offload pages.
+// Setup: Pure subsystem anchor shim for oodrv-accel core pages.
+// Beats:
+//   1. Export the core accelerator state machine and GPU/NPU driver pages.
+//   2. Export the CXL coherent fabric, PQ crypto/compression offload, and event-dump pages.
+
+import "engine.oo";
+import "driver_gpu_cmdq.oo";
+import "driver_npu_mx.oo";
+import "driver_cxl_fabric.oo";
+import "driver_pq_qat.oo";
+import "evt_dump.oo";

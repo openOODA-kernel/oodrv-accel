@@ -1,0 +1,117 @@
+// # oodrv-accel Capability-Gated Filesystem Inspector
+//
+// Logline: Filesystem inspector classifying/loading real paths under a sealed FsReadCap.
+// Setup: Declared cap: FsRead. One path per call via sealed probes; never writes/escalates.
+// Beats:
+//   1. Classify a real path as file, dir, or missing through sealed capability probes.
+//   2. Load real file bytes and derive line count, bounded excerpt, and a SHA-256 content digest.
+//   3. Enumerate a real directory and count the entries it exposes.
+//   4. Render deterministic text and JSON summaries for CLI consumption.
+
+import "oostd/fs/os/fs.oo";
+import "core/fs/gate.oo";
+
+type AccelFsProbe = struct {
+    path: String,
+    kind: String,
+    exists: Bool,
+    read_len: Int,
+    line_count: Int,
+    entry_count: Int,
+    content: String,
+    digest: String,
+    is_ready: Bool
+};
+
+pub fn accel_fs_default_path() -> String {
+    return "/proc/modules";
+}
+
+pub fn accel_fs_count_lines(body: String) -> Int {
+    let n: Int = chars_len(body);
+    let mut lines: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(body, i) == "\n" { lines = lines + 1; }
+        i = i + 1;
+    }
+    if n > 0 && char_at(body, n - 1) != "\n" { lines = lines + 1; }
+    return lines;
+}
+
+pub fn accel_fs_head(body: String, limit: Int) -> String {
+    let n: Int = chars_len(body);
+    if limit <= 0 { return ""; }
+    if n <= limit { return body; }
+    return str_slice(body, 0, limit);
+}
+
+pub fn accel_fs_escape(raw: String) -> String {
+    let n: Int = chars_len(raw);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(raw, i);
+        if c == "\"" {
+            out = out + "'";
+        } else if c == "\\" {
+            out = out + "\\\\";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn accel_fs_probe(fs: &FsReadCap, path: String) -> AccelFsProbe {
+    if oodrv_accel_path_refused(path) {
+        return AccelFsProbe { path: "", kind: "refused", exists: false, read_len: 0, line_count: 0, entry_count: 0,
+            content: "", digest: "", is_ready: false };
+    }
+    if chars_len(path) == 0 {
+        return AccelFsProbe { path: "", kind: "missing", exists: false, read_len: 0, line_count: 0, entry_count: 0,
+            content: "", digest: "", is_ready: true };
+    }
+    if fs_path_exists(fs, path) == false {
+        return AccelFsProbe { path: path, kind: "missing", exists: false, read_len: 0, line_count: 0, entry_count: 0,
+            content: "", digest: "", is_ready: true };
+    }
+    if fs_is_dir(fs, path) {
+        let names: List[String] = fs_read_dir(fs, path);
+        let count: Int = list_len(names);
+        let first: String = if count > 0 { list_get(names, 0) } else { "" };
+        return AccelFsProbe { path: path, kind: "dir", exists: true, read_len: 0, line_count: 0, entry_count: count,
+            content: first, digest: "", is_ready: true };
+    }
+    let r: Result[String, String] = fs_read_file(fs, path);
+    if r.is_err() {
+        return AccelFsProbe { path: path, kind: "unreadable", exists: true, read_len: 0, line_count: 0, entry_count: 0,
+            content: "", digest: "", is_ready: false };
+    }
+    let body: String = match r { Ok(v) => v, Err(_) => "" };
+    return AccelFsProbe { path: path, kind: "file", exists: true, read_len: chars_len(body),
+        line_count: accel_fs_count_lines(body), entry_count: 0, content: accel_fs_head(body, 120),
+        digest: crypto_sha256_internal(body), is_ready: true };
+}
+
+pub fn accel_fs_load(fs: &FsReadCap, path: String) -> AccelFsProbe {
+    let p: AccelFsProbe = accel_fs_probe(fs, path);
+    if p.kind != "file" { return p; }
+    let r: Result[String, String] = fs_read_file(fs, path);
+    if r.is_err() { return p; }
+    let body: String = match r { Ok(v) => v, Err(_) => "" };
+    return AccelFsProbe { path: p.path, kind: p.kind, exists: p.exists, read_len: p.read_len, line_count: p.line_count,
+        entry_count: p.entry_count, content: accel_fs_head(body, 4096), digest: p.digest, is_ready: p.is_ready };
+}
+
+pub fn accel_fs_render(p: AccelFsProbe) -> String {
+    return "path=" + p.path + " kind=" + p.kind + " bytes=" + p.read_len.to_string() + " lines=" +
+        p.line_count.to_string() + " entries=" + p.entry_count.to_string() + " digest=" + p.digest;
+}
+
+pub fn accel_fs_json(p: AccelFsProbe) -> String {
+    return "{\"path\":\"" + accel_fs_escape(p.path) + "\",\"kind\":\"" + p.kind + "\",\"bytes\":" +
+        p.read_len.to_string() + ",\"lines\":" + p.line_count.to_string() + ",\"entries\":" +
+        p.entry_count.to_string() + ",\"digest\":\"" + p.digest + "\",\"status\":\"pass\"}";
+}

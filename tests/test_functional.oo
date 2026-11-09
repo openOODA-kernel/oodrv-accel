@@ -1,0 +1,145 @@
+// # oodrv-accel Axis-1 Positive Functional I/O Suite
+//
+// Logline: Happy-path GPU cmdq, NPU systolic, CXL fabric, QAT offload, real /tmp I/O, and persona dispatch assertions.
+// Setup: Imports the root anchor and fs pages; FsReadCap, FsWriteCap, DmaCap, MmioCap, GpuCap, PciCap at compile time.
+// Beats:
+//   1. Exercise GPU packet submission, doorbell ring, fence completion, and quorum/blackbox verification.
+//   2. Exercise NPU tile cycle accounting, CXL window map/peer-DMA/revocation, and QAT slot isolation.
+//   3. Exercise real file/dir probes, manifest round-trips, state snapshots, themes, and persona dispatch.
+
+import "anchor.oo";
+import "oostd/fs/os/fs.oo";
+import "core/fs/fsprobe.oo";
+import "core/fs/manifest.oo";
+import "core/fs/state.oo";
+
+fn expect(cond: Bool, label: String) -> Bool {
+    if cond {
+        println("ok " + label);
+        return true;
+    }
+    println("FAIL " + label);
+    return false;
+}
+
+fn check_gpu_and_npu(gpu: &GpuCap, dma: &DmaCap, mmio: &MmioCap) -> Int {
+    let mut n: Int = 0;
+    let q0: GpuComputeQueue = gpu_cmdq_init(gpu, dma, mmio, 16777216, 4096, 268435456, 268435456, 256);
+    let pkt: GpuCmdPacket = gpu_packet_new(1, 7, 269484032, 8, 8, 1, 4294967295);
+    let q1: GpuComputeQueue = gpu_cmdq_submit(q0, gpu, dma, mmio, pkt);
+    let q2: GpuComputeQueue = gpu_cmdq_complete(gpu_cmdq_ring_doorbell(q1, mmio), dma, 1);
+    if expect(q2.submitted_pkts == 1 && q2.doorbell_rings == 1 && q2.completed_pkts == 1 && q2.epoch == 2 &&
+        gpu_quorum_blackbox_verify(q2, 57), "01 GPU cmdq submit->doorbell->complete + quorum/blackbox trace") {
+        n = n + 1; }
+    let pkt2: GpuCmdPacket = gpu_packet_new(2, 9, 270532608, 4, 4, 1, 3);
+    let rt_q1: GpuComputeQueue = gpu_cmdq_submit(gpu_cmdq_submit(q0, gpu, dma, mmio, pkt), gpu, dma, mmio, pkt2);
+    let rt_q2: GpuComputeQueue = gpu_cmdq_complete(gpu_cmdq_complete(rt_q1, dma, 1), dma, 2);
+    if expect(pkt.wg_dims == ((1 << 20) | (8 << 10) | 8) && rt_q2.submitted_pkts == 2 && rt_q2.completed_pkts == 2 &&
+        rt_q2.tail == 2 && rt_q2.head == 2 && gpu_vram_in_bar(q0, pkt2.shader_phys, 4096),
+        "02 round-trip: gpu submit->fence pairs balance ring accounting and VRAM BAR bounds") { n = n + 1; }
+    let e0: NpuSystolicEngine = npu_mx_init(dma, 16, 33554432, 16777216, 1048576);
+    let td: NpuTileDesc = npu_tile_new(2, 16, 16, 33554432, 4096);
+    let e1: NpuSystolicEngine = npu_mx_submit_tile(e0, dma, td);
+    let e2: NpuSystolicEngine = npu_mx_drain(e1, dma);
+    if expect(e1.inflight == 1 && e1.cycles_used == npu_mx_tile_cycles(e0, td) && e1.epoch == 2 &&
+        e2.tiles_done == 1 && npu_quorum_blackbox_verify(e2, 58),
+        "03 NPU systolic tile submit->drain with deterministic cycle accounting + quorum/blackbox") { n = n + 1; }
+    let td_i4: NpuTileDesc = npu_tile_new(1, 32, 32, 33554496, 8192);
+    let e3: NpuSystolicEngine = npu_mx_submit_tile(e1, dma, td_i4);
+    if expect(npu_mx_tile_cycles(e0, td_i4) == 256 && npu_mx_tile_cycles(e0, td_i4) == npu_mx_tile_cycles(e0, td_i4) &&
+        e3.inflight == 2 && e3.cycles_used == e1.cycles_used + 256,
+        "04 deterministic Q32 cycle budget: INT4 32x32 tile costs 256 cycles and accumulates") { n = n + 1; }
+    return n;
+}
+
+fn check_cxl_and_qat(pci: &PciCap, dma: &DmaCap) -> Int {
+    let mut n: Int = 0;
+    let d0: CxlFabricDevice = cxl_dev_init(pci, dma, 0, 2, 536870912, 268435456);
+    let w0: CxlHdmWindow = cxl_window_new(536870912, 268435456, 1);
+    let d1: CxlFabricDevice = cxl_map_window(d0, pci, w0, 0);
+    let d2: CxlFabricDevice = cxl_peer_dma(d1, dma, 536870912, 537919488, 4096);
+    if expect(d1.window_mask == 1 && d2.peer_dmas == 1 && d2.epoch == 2 && cxl_quorum_blackbox_verify(d2, 59),
+        "05 CXL HDM-DB window map + cache-coherent peer-DMA + quorum/blackbox") { n = n + 1; }
+    let d3: CxlFabricDevice = cxl_revoke_cap(d2, 0);
+    let d4: CxlFabricDevice = cxl_map_window(d3, pci, w0, 0);
+    if expect(d3.revoked_mask == 1 && d3.window_mask == 0 && d3.cap_epoch == 2 && d4.window_mask == 0 &&
+        d4.revoked_mask == 1, "06 CXL capability revocation is monotonic: a revoked slot refuses re-map") { n = n + 1; }
+    let r0: QatAccelRing = qat_ring_init(dma, 50331648, 64);
+    let qd: QatRingDesc = qat_desc_new(5, 50593792, 50597888, 1024, 3);
+    let r1: QatAccelRing = qat_submit(r0, dma, qd);
+    let r2: QatAccelRing = qat_complete(r1, dma, 3);
+    if expect(r1.inflight_slots == 8 && r1.epoch == 2 && r2.ops_done == 1 && r2.inflight_slots == 0 &&
+        qat_keyslot_isolated(r2, 3) && qat_quorum_blackbox_verify(r2, 60),
+        "07 QAT ring submit->complete with zero-leak key-slot isolation + quorum/blackbox") { n = n + 1; }
+    return n;
+}
+
+fn check_fs_and_manifest(fs: &FsReadCap, fs_w: &FsWriteCap) -> Int {
+    let mut n: Int = 0;
+    let target: String = if fs_path_exists(fs, "/proc/version") { "/proc/version" } else { "VERSION" };
+    let pf: AccelFsProbe = accel_fs_probe(fs, target);
+    let pd: AccelFsProbe = accel_fs_probe(fs, "/proc/self");
+    if expect(pf.kind == "file" && pd.kind == "dir",
+        "08 FsReadCap file and directory probes") { n = n + 1; }
+    let mp: String = "/tmp/oodrv_accel_manifest.txt";
+    let wr: Result[Void, String] = fs_write_file(fs_w, mp, "1 0 12 3 0\n2 1 40 25 0\n3 4 7 9 2\n");
+    let m_ok: AccelManifest = accel_manifest_load(fs, mp);
+    if expect(wr.is_err() == false && m_ok.code == 0 && m_ok.count == 3,
+        "09 manifest round-trip: write under FsWriteCap then load validates 3 records") { n = n + 1; }
+    let sp: String = "/tmp/oodrv_accel_state.oot";
+    let wrc: Int = kstate_write(fs_w, sp, "test", "1.0");
+    let srd: Result[String, String] = fs_read_file(fs, sp);
+    let sbody: String = match srd { Ok(t) => t, Err(_) => "" };
+    if expect(wrc == 0 && str_index_of(sbody, "# kernel state") >= 0 && kstate_scan(fs, "/tmp") >= 1 &&
+        kstate_parent("/tmp/x/y.oot") == "/tmp/x" && kstate_parent("/f.oot") == "/" &&
+        kstate_parent("x/y.oot") == "x",
+        "10 io: state snapshot write+readback+scan+parent helper") { n = n + 1; }
+    let st0: AccelDrvContext = accel_init(1, 24576, 128);
+    let rec: AccelDrvContext = accel_record_parse(1, 2, 3, 4, 5);
+    if expect(accel_verify(st0) && accel_record_desc(rec) == "Accel descriptor: 1,2,3,4,5",
+        "11 accelerator state machine and descriptor parser") { n = n + 1; }
+    return n;
+}
+
+fn check_persona_and_theme() -> Int {
+    let mut n: Int = 0;
+    let mut a1: List[String] = list_new();
+    a1 = list_push(a1, "status");
+    let d1: PersonaDispatch = persona_resolve("oodrv-accel", a1);
+    let d2: PersonaDispatch = persona_resolve("oodrv-gpu", a1);
+    if expect(d1.persona.name == "oodrv-accel" && d2.persona.name == "oodrv-gpu",
+        "12 multi-call persona dispatch for oodrv-accel and oodrv-gpu") { n = n + 1; }
+    let mut a2: List[String] = list_new();
+    a2 = list_push(a2, "oodrv-gpu");
+    a2 = list_push(a2, "status");
+    let d_pos: PersonaDispatch = persona_resolve("oodrv-accel", a2);
+    let mut a3: List[String] = list_new();
+    a3 = list_push(a3, "--json");
+    let d_json: PersonaDispatch = persona_resolve("oodrv-accel", a3);
+    if expect(d_pos.persona.name == "oodrv-gpu" && d_pos.mode == "status" && d_pos.action == "run" &&
+        d_json.mode == "json" && chars_len(persona_json(persona_by_name("oodrv-accel"), 1)) > 60,
+        "13 persona subcommand dispatch and --json descriptor") { n = n + 1; }
+    let t_dark: OoThemePalette = ootheme_resolve("ooda-dark");
+    if expect(ootheme_verify(t_dark) && ootheme_verify(ootheme_resolve("ooda-light")) &&
+        ootheme_verify(ootheme_resolve("1982")) && ootheme_verify(ootheme_resolve("high-contrast")) &&
+        ootheme_verify(ootheme_resolve("no-color")) &&
+        ootheme_tui_frame(t_dark, "oodrv-accel", "0.6.1", "kernel", "PASS") == ootheme_tui_frame(t_dark, "oodrv-accel",
+        "0.6.1", "kernel", "PASS") && chars_len(ootheme_json(t_dark)) > 32,
+        "14 all five unified palettes seal-verify and TUI/JSON render deterministically") { n = n + 1; }
+    return n;
+}
+
+pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap,
+    _args: List[String]) -> Result[Int, String] {
+    let mut passed: Int = 0;
+    passed = passed + check_gpu_and_npu(gpu, dma, mmio);
+    passed = passed + check_cxl_and_qat(pci, dma);
+    passed = passed + check_fs_and_manifest(fs_r, fs_w);
+    passed = passed + check_persona_and_theme();
+    if passed != 14 {
+        println("FAIL: " + passed.to_string() + "/14 assertions");
+        return Err("verification failed");
+    }
+    println("PASS: 14/14 assertions");
+    return Ok(0);
+}

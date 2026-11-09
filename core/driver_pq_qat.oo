@@ -1,0 +1,154 @@
+// # Hardware Crypto / Post-Quantum & Compression Offload Engine Driver
+//
+// Logline: ML-KEM-768, ML-DSA-65, SHA-3, and Keccak QAT-style ring descriptor verifier with zero-leak key-slot isolation.
+// Setup: Declared caps: DmaCap (+TpmCap mask). Ring state stores only PQC seals; raw key material never persists.
+// Beats:
+//   1. Declare QatRingDesc batch descriptor and QatAccelRing engine state for IOMMU-pinned crypto rings.
+//   2. Validate op codes (ML-KEM encap/decap, ML-DSA sign/verify, SHA-3, Keccak, compress/decompress) and slot bounds.
+//   3. Enforce zero-leak key-slot isolation: one in-flight op per key slot, sealed via oo_pqc_sha3_round.
+//   4. Gate descriptor submission on a 4-phase OODA turn + checkpoint + warrant + IPC wire frame.
+
+import "oostd/core/ooda.oo";
+import "oostd/sec/capreg.oo";
+import "oostd/sec/pqc.oo";
+import "oostd/sec/warrant_grp/warrant.oo";
+import "oostd/sec/attest.oo";
+import "oostd/sec/audit.oo";
+import "oostd/sec/blackbox_grp/blackbox.oo";
+import "oostd/sec/speculate_grp/speculate.oo";
+import "oostd/sec/quorum_grp/quorum.oo";
+import "oostd/sec/delegate_grp/delegate.oo";
+import "oostd/hw/ipc/wire.oo";
+
+type QatRingDesc = struct {
+    op: Int,
+    src_phys: Int,
+    dst_phys: Int,
+    len_bytes: Int,
+    key_slot: Int
+};
+
+type QatAccelRing = struct {
+    ring_phys: Int,
+    depth: Int,
+    head: Int,
+    tail: Int,
+    inflight_slots: Int,
+    slot_seal: Int,
+    ops_done: Int,
+    epoch: Int,
+    causal_root: Int
+};
+
+pub fn qat_op_ok(op: Int) -> Bool {
+    return op >= 1 && op <= 8;
+}
+
+pub fn qat_desc_new(op: Int, src_phys: Int, dst_phys: Int, len: Int, key_slot: Int) -> QatRingDesc {
+    return QatRingDesc {
+        op: if qat_op_ok(op) { op } else { 0 },
+        src_phys: if src_phys < 4096 || (src_phys % 64) != 0 { 0 } else { src_phys },
+        dst_phys: if dst_phys < 4096 || (dst_phys % 64) != 0 { 0 } else { dst_phys },
+        len_bytes: if len <= 0 || len > 1048576 { 0 } else { len },
+        key_slot: if key_slot < 0 || key_slot > 7 { 0 } else { key_slot }
+    };
+}
+
+pub fn qat_ring_init(_dma: &DmaCap, ring_phys: Int, depth: Int) -> QatAccelRing {
+    let safe_ring: Int = if ring_phys < 4096 || (ring_phys % 4096) != 0 { 50331648 } else { ring_phys };
+    let safe_depth: Int = if depth < 4 || depth > 256 || (depth & (depth - 1)) != 0 { 64 } else { depth };
+    return QatAccelRing {
+        ring_phys: safe_ring,
+        depth: safe_depth,
+        head: 0,
+        tail: 0,
+        inflight_slots: 0,
+        slot_seal: oo_pqc_sha3_round(safe_ring, safe_depth + 1),
+        ops_done: 0,
+        epoch: 1,
+        causal_root: oo_audit_genesis()
+    };
+}
+
+pub fn qat_slot_free(ring: QatAccelRing, slot: Int) -> Bool {
+    if slot < 0 || slot > 7 { return false; }
+    return (ring.inflight_slots & (1 << slot)) == 0;
+}
+
+pub fn qat_submit(ring: QatAccelRing, _dma: &DmaCap, desc: QatRingDesc) -> QatAccelRing {
+    if ring.depth <= 0 || ring.tail < 0 || ring.tail >= ring.depth { return ring; }
+    if ring.ops_done < 0 || ring.tail - ring.head >= ring.depth { return ring; }
+    if qat_op_ok(desc.op) == false || desc.src_phys <= 0 || desc.dst_phys <= 0 || desc.len_bytes <= 0 ||
+        desc.key_slot > 7 {
+        return ring;
+    }
+    if qat_slot_free(ring, desc.key_slot) == false { return ring; }
+    let caps: Int = (1 << oo_cap_bit_index("TpmCap")) | (1 << oo_cap_bit_index("DmaCap"));
+    let parent_reg64: Int = oo_cap_reg64_pack(ring.epoch, 30, 1, caps);
+    if oo_warrant_check(parent_reg64, ring.epoch, caps, 24) == false { return ring; }
+    let turn: OodaTurn = oo_ooda_cycle(parent_reg64, ring.epoch, 24, caps, 100, desc.src_phys, desc.dst_phys,
+        desc.len_bytes, desc.op, ring.ops_done + 1, 17, 29);
+    let next_ep: Int = turn.epoch;
+    let child_reg64: Int = oo_cap_reg64_pack(next_ep, 30, 2, caps);
+    let dseal: Int = oo_delegate_seal(ring.causal_root, child_reg64, 24, 17, 29);
+    let d_ok: Bool = oo_delegate_gate(parent_reg64, child_reg64, caps, ring.epoch, next_ep, 24, ring.causal_root,
+        dseal, 17, 29);
+    let ckpt: Ckpt = oo_ckpt_new(desc.src_phys, turn.causal_root, child_reg64);
+    let seal: Int = oo_attest_seal(child_reg64, 24, ckpt.causal_root, 17, 29);
+    let next_root: Int = oo_speculate(ckpt, next_ep, caps, 24, seal, 17, 29, desc.len_bytes);
+    let fr: Wire = oo_wire_decode(oo_wire_encode(9, 24, child_reg64, desc.src_phys, desc.len_bytes, desc.key_slot,
+        next_ep, next_root));
+    if turn.committed == false || d_ok == false || next_root <= ckpt.causal_root || fr.valid == false {
+        return ring;
+    }
+    return QatAccelRing {
+        ring_phys: ring.ring_phys,
+        depth: ring.depth,
+        head: ring.head,
+        tail: (ring.tail + 1) % ring.depth,
+        inflight_slots: ring.inflight_slots | (1 << desc.key_slot),
+        slot_seal: oo_pqc_sha3_round(ring.slot_seal, desc.key_slot + next_ep),
+        ops_done: ring.ops_done,
+        epoch: next_ep,
+        causal_root: next_root
+    };
+}
+
+pub fn qat_complete(ring: QatAccelRing, _dma: &DmaCap, slot: Int) -> QatAccelRing {
+    if slot < 0 || slot > 7 || (ring.inflight_slots & (1 << slot)) == 0 { return ring; }
+    return QatAccelRing {
+        ring_phys: ring.ring_phys,
+        depth: ring.depth,
+        head: (ring.head + 1) % ring.depth,
+        tail: ring.tail,
+        inflight_slots: ring.inflight_slots & (255 - (1 << slot)),
+        slot_seal: ring.slot_seal,
+        ops_done: ring.ops_done + 1,
+        epoch: ring.epoch,
+        causal_root: oo_audit_link(ring.causal_root, slot + 512)
+    };
+}
+
+pub fn qat_keyslot_isolated(ring: QatAccelRing, slot: Int) -> Bool {
+    if slot < 0 || slot > 7 || ring.slot_seal <= 0 { return false; }
+    return ring.slot_seal != slot && ring.slot_seal != ring.ring_phys;
+}
+
+pub fn qat_quorum_blackbox_verify(ring: QatAccelRing, irq_vec: Int) -> Bool {
+    let caps: Int = (1 << oo_cap_bit_index("TpmCap")) | (1 << oo_cap_bit_index("DmaCap"));
+    let vec: Int = if irq_vec < 0 || irq_vec > 255 { 0 } else { irq_vec };
+    let rights: Int = 30 | vec;
+    let v1: Int = oo_cap_reg64_pack(ring.epoch, rights, 1, caps);
+    let v2: Int = oo_cap_reg64_pack(ring.epoch, rights, 2, caps);
+    let v3: Int = oo_cap_reg64_pack(ring.epoch, rights, 3, caps);
+    let mut votes: List[Int] = list_new();
+    votes = list_push(votes, v1);
+    votes = list_push(votes, v2);
+    votes = list_push(votes, v3);
+    let qseal: Int = oo_quorum_seal(v1, 24, ring.causal_root, 17, 29);
+    let q_ok: Bool = oo_quorum_act_gate(votes, 1, v1, ring.epoch, caps, 24, ring.causal_root, qseal, 17, 29);
+    let bb_seal: Int = oo_blackbox_seal(irq_vec, v1, ring.ops_done + 1, ring.causal_root, 17, 29);
+    let bb_ok: Bool = oo_blackbox_replay(bb_seal, irq_vec, v1, ring.epoch, caps, ring.ops_done + 1, ring.causal_root,
+        17, 29);
+    return q_ok && bb_ok;
+}

@@ -1,0 +1,14 @@
+name=oodrv-accel
+version=0.6.1
+layer=L1-kernel
+category=HW
+tags=gpu,npu,tpu,systolic,cxl,hdm,peer-dma,ml-kem,ml-dsa,sha3,keccak,qat,doorbell,multicall,argv0
+upstream=accel-spec
+status=shipped
+description=openOODA GPU compute command queue & doorbell ring, NPU/TPU systolic matrix engine, CXL 3.0 Type-2/Type-3 coherent memory & peer-DMA fabric, and PQ crypto + compression QAT offload driver (consolidating oodrv-gpu)
+caps=FsReadCap,FsWriteCap,DmaCap,MmioCap,GpuCap,PciCap
+deps=
+entry=cli/main.oo
+payload=cli/main.oo
+personas=oodrv-accel,oodrv-gpu
+dispatch=explicit-verb,persona-subcommand

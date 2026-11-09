@@ -1,0 +1,181 @@
+// # oodrv-accel Multi-Call Persona Dispatch & CLI Mode Resolver
+//
+// Logline: Compact multi-call persona dispatch and CLI mode resolution for oodrv-accel and oodrv-gpu.
+// Setup: Declared capability: None. Pure resolution over the persona-ownership.oot tokens without symlink aliases.
+// Beats:
+//   1. Publish the canonical oodrv-accel and absorbed oodrv-gpu personas.
+//   2. Resolve argv[0] or leading persona token; refuse legacy --persona/--mode/--list-personas flags with a usage fault.
+//   3. Resolve CLI flags (status, verify, inspect, load, theme, about, --manifest, --json,
+//      --self-test, --help, --version) and render contract lines.
+
+type Persona = struct {
+    name: String,
+    version: String,
+    layer: String,
+    category: String,
+    desc: String,
+    usage_tail: String,
+    active: Int
+};
+
+type PersonaDispatch = struct {
+    persona: Persona,
+    mode: String,
+    operand: String,
+    manifest: String,
+    savepath: String,
+    action: String,
+    message: String
+};
+
+pub fn persona_by_name(n: String) -> Persona {
+    let tail: String = "[status, verify, inspect [path], load <path>, theme <name>, about, --manifest <path>, --tui]" +
+        " [--json] [--self-test] [--help] [--version]";
+    if n == "oodrv-accel" {
+        return Persona { name: "oodrv-accel", version: "0.6.1", layer: "kernel", category: "DRV",
+            desc: "GPU compute queues, NPU systolic matrix engines, CXL coherent fabric, and PQ crypto offload driver",
+            usage_tail: tail, active: 24 };
+    }
+    if n == "oodrv-gpu" {
+        return Persona { name: "oodrv-gpu", version: "0.6.1", layer: "kernel", category: "DRV",
+            desc: "GPU compute command queue and MMIO doorbell ring driver for CUDA, ROCm, and Vulkan-Compute",
+            usage_tail: tail, active: 24 };
+    }
+    return Persona { name: "", version: "", layer: "", category: "", desc: "", usage_tail: "", active: 0 };
+}
+
+pub fn persona_basename(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut cut: Int = -1;
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(s, i) == "/" { cut = i; }
+        i = i + 1;
+    }
+    if cut < 0 { return s; }
+    return str_slice(s, cut + 1, n);
+}
+
+pub fn persona_flag_kind(a: String) -> String {
+    if a == "-h" || a == "--help" { return "help"; }
+    if a == "-v" || a == "--version" { return "version"; }
+    if a == "--json" { return "json"; }
+    if a == "--tui" { return "tui"; }
+    if a == "--self-test" { return "selftest"; }
+    if a == "status" { return "status"; }
+    if a == "verify" { return "verify"; }
+    if a == "inspect" { return "inspect"; }
+    if a == "load" { return "load"; }
+    if a == "theme" { return "theme"; }
+    if a == "about" { return "about";
+    }
+    if a == "--manifest" { return "manifest"; }
+    if a == "--save" { return "save"; }
+    return "";
+}
+
+fn persona_scan_args(p: Persona, rest: List[String]) -> PersonaDispatch {
+    let n: Int = list_len(rest);
+    let mut verbs: Int = 0;
+    let mut verb: String = "";
+    let mut op: String = "";
+    let mut mpath: String = "";
+    let mut spath: String = "";
+    let mut flag_mode: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let a: String = list_get(rest, i);
+        let k: String = persona_flag_kind(a);
+        if k == "manifest" {
+            if i + 1 >= n || persona_flag_kind(list_get(rest, i + 1)) != "" {
+                return PersonaDispatch { persona: p, mode: "error", operand: "", manifest: "", savepath: "",
+                    action: "error", message: "--manifest requires a path" };
+            }
+            mpath = list_get(rest, i + 1);
+            i = i + 2;
+            continue;
+        }
+        if k == "save" {
+            if i + 1 >= n || persona_flag_kind(list_get(rest, i + 1)) != "" {
+                return PersonaDispatch { persona: p, mode: "error", operand: "", manifest: "", savepath: "",
+                    action: "error", message: "--save requires a path" };
+            }
+            spath = list_get(rest, i + 1);
+            i = i + 2;
+            continue;
+        }
+        if k == "help" || k == "version" || k == "json" || k == "selftest" || k == "tui" {
+            if chars_len(flag_mode) == 0 { flag_mode = k; }
+            i = i + 1;
+            continue;
+        }
+        if k == "status" || k == "verify" || k == "inspect" || k == "load" || k == "theme" || k == "about" {
+            verbs = verbs + 1;
+            verb = k;
+            if (k == "inspect" || k == "load" || k == "theme") && i + 1 < n && persona_flag_kind(list_get(rest, i + 1)) == "" {
+                op = list_get(rest, i + 1);
+                i = i + 2;
+                continue;
+            }
+            i = i + 1;
+            continue;
+        }
+        return PersonaDispatch { persona: p, mode: "unknown", operand: "", manifest: "", savepath: "", action: "error",
+            message: "unknown argument" };
+    }
+    if verbs > 1 {
+        return PersonaDispatch { persona: p, mode: "conflict", operand: "", manifest: "", savepath: "",
+            action: "error", message: "conflicting arguments" };
+    }
+    let final_mode: String = if flag_mode == "help" || flag_mode == "version" { flag_mode } else if verbs == 1 &&
+        verb == "theme" { "theme" } else if verbs == 1 && verb == "about" { "about" } else if chars_len(flag_mode) > 0 {
+        flag_mode } else if verbs == 1 { verb }
+        else { "default" };
+    return PersonaDispatch { persona: p, mode: final_mode, operand: op, manifest: mpath,
+        savepath: spath, action: "run", message: "" };
+}
+
+fn persona_flag_refused(a: String) -> Bool {
+    if a == "--persona" || a == "--persona=" || a == "--mode" || a == "--list-personas" { return true; }
+    if chars_len(a) > 10 && str_slice(a, 0, 10) == "--persona=" { return true; }
+    return false;
+}
+
+pub fn persona_resolve(argv0: String, args: List[String]) -> PersonaDispatch {
+    let base: String = persona_basename(argv0);
+    let mut p: Persona = persona_by_name(base);
+    if chars_len(p.name) == 0 { p = persona_by_name("oodrv-accel"); }
+    let mut rest: List[String] = list_new();
+    let n: Int = list_len(args);
+    let mut i: Int = 0;
+    while i < n {
+        let a: String = list_get(args, i);
+        if persona_flag_refused(a) {
+            return PersonaDispatch { persona: p, mode: "usage", operand: "", manifest: "", savepath: "",
+                action: "usage", message: "persona flags removed; use '" + p.name + " [persona] <mode>'" };
+        }
+        rest = list_push(rest, a);
+        i = i + 1;
+    }
+    return persona_route(p, rest);
+}
+
+fn persona_route(p: Persona, rest: List[String]) -> PersonaDispatch {
+    if list_len(rest) > 0 {
+        let q0: Persona = persona_by_name(list_get(rest, 0));
+        if chars_len(q0.name) > 0 {
+            let mut tail: List[String] = list_new();
+            let mut ti: Int = 1;
+            while ti < list_len(rest) { tail = list_push(tail, list_get(rest, ti));
+            ti = ti + 1;
+            }
+            return persona_scan_args(q0, tail);
+        }
+    }
+    return persona_scan_args(p, rest);
+}
+
+pub fn persona_json(p: Persona, active: Int) -> String {
+    return "{\"component\":\"" + p.name + "\",\"version\":\"" + p.version + "\",\"layer\":\"" + p.layer + "\",\"category\":\"" +
+        p.category + "\",\"active\":" + active.to_string() + ",\"status\":\"pass\"}";
+}

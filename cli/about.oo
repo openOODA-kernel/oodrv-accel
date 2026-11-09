@@ -1,0 +1,63 @@
+// # oodrv-accel About Descriptor
+//
+// Logline: Renders the Binary, Organization, Summary, Subcommands, Capabilities, and Theme of an oodrv-accel persona.
+//
+// Setup: Declared capability: None. Pure string building over the persona record.
+//
+// Beats:
+//   1. Report the binary name and the organization that owns the repository.
+//   2. Report the persona summary, the subcommand surface, the capability set, and the active ootheme palette.
+//   3. Refuse an unregistered persona rather than printing an empty descriptor.
+import "cli/dispatch.oo";
+
+pub fn persona_caps(name: String) -> String {
+    if name == "oodrv-accel" { return "FsReadCap, FsWriteCap, DmaCap, MmioCap, GpuCap, PciCap";
+    }
+    if name == "oodrv-gpu" { return "FsReadCap, FsWriteCap, DmaCap, MmioCap, GpuCap, PciCap";
+    }
+    return "";
+}
+pub fn persona_subcommands() -> String {
+    return "oodrv-accel, oodrv-gpu, status, verify, inspect, load, theme, " +
+        "about, --manifest, --json, --self-test, --tui, --help, --version";
+}
+pub fn persona_theme() -> String {
+    return "ooda-dark";
+}
+pub fn persona_about(p: Persona) -> String {
+    let caps: String = persona_caps(p.name);
+    if chars_len(caps) == 0 { return "";
+    }
+    return "Binary: " + p.name + "\n" + "Organization: openOODA-kernel\n" + "Summary: " + p.desc + "\n" +
+        "Subcommands: " + persona_subcommands() + "\n" + "Capabilities: " + caps + "\n" +
+        "Theme: " + persona_theme();
+}
+pub fn persona_about_json(p: Persona) -> String {
+    let caps: String = persona_caps(p.name);
+    if chars_len(caps) == 0 { return "";
+    }
+    return "{\"binary\":\"" + p.name + "\",\"organization\":\"openOODA-kernel\"," +
+        "\"summary\":\"" + p.desc + "\",\"subcommands\":\"" + persona_subcommands() +
+        "\",\"capabilities\":\"" + caps + "\",\"theme\":\"" + persona_theme() + "\"}";
+}
+pub fn persona_about_json_flag(args: List[String]) -> Bool {
+    let mut i: Int = 0;
+    while i < list_len(args) {
+        if list_get(args, i) == "--json" { return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn persona_about_mode(p: Persona, args: List[String]) -> Result[Int, String] {
+    let about: String = persona_about(p);
+    if chars_len(about) == 0 { println("ERR: " + p.name + ": unknown persona (fail closed)");
+    return Ok(2);
+    }
+    if persona_about_json_flag(args) { println(persona_about_json(p));
+    return Ok(0);
+    }
+    println(about);
+    return Ok(0);
+}

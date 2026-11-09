@@ -1,0 +1,19 @@
+// # oodrv-accel Component Identity
+//
+// Logline: Reports the oodrv-accel component version and canonical component name.
+// Setup: Declared capability: None. Pure constant accessors over the component identity.
+// Beats:
+//   1. Return the canonical component version string.
+//   2. Return the canonical component name string.
+//
+// The identity accessors live on their own page because an anchor page is a
+// module index: oodac's multi-module build skips anchor.oo bodies, so a
+// definition parked there never reaches the linker.
+
+pub fn accel_version() -> String {
+    return "0.6.1";
+}
+
+pub fn accel_component_name() -> String {
+    return "oodrv-accel";
+}

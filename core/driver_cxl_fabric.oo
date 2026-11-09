@@ -1,0 +1,168 @@
+// # CXL 3.0 Type-2 / Type-3 Accelerator Coherent Memory & Peer-DMA Fabric Driver
+//
+// Logline: Device-attached HDM-DB/HDM-D cache-coherent window validation, peer-to-peer DMA, and capability revocation.
+// Setup: Declared caps: PciCap, DmaCap. Imports std/core/ooda.oo, std/sec/*, std/hw/ipc/wire.oo.
+// Beats:
+//   1. Declare CxlHdmWindow decoder window and CxlFabricDevice port state for Type-2 (HDM-DB bias) / Type-3 (HDM-D).
+//   2. Validate HDM decoder base/size at 256MiB granularity and bound window maps by bit-indexed capability slots.
+//   3. Gate peer-to-peer DMA on HDM window bounds + a 4-phase OODA turn + checkpoint + warrant + IPC wire frame.
+//   4. Revoke window capabilities monotonically; a revoked slot can never be re-mapped.
+
+import "oostd/core/ooda.oo";
+import "oostd/sec/capreg.oo";
+import "oostd/sec/warrant_grp/warrant.oo";
+import "oostd/sec/attest.oo";
+import "oostd/sec/audit.oo";
+import "oostd/sec/blackbox_grp/blackbox.oo";
+import "oostd/sec/speculate_grp/speculate.oo";
+import "oostd/sec/quorum_grp/quorum.oo";
+import "oostd/sec/delegate_grp/delegate.oo";
+import "oostd/hw/ipc/wire.oo";
+
+type CxlHdmWindow = struct {
+    hdm_base: Int,
+    hdm_size: Int,
+    coherent: Int
+};
+
+type CxlFabricDevice = struct {
+    port_id: Int,
+    dev_type: Int,
+    hdm_base: Int,
+    hdm_size: Int,
+    cap_epoch: Int,
+    window_mask: Int,
+    revoked_mask: Int,
+    peer_dmas: Int,
+    epoch: Int,
+    causal_root: Int
+};
+
+pub fn cxl_window_new(hdm_base: Int, hdm_size: Int, coherent: Int) -> CxlHdmWindow {
+    let gran: Int = 268435456;
+    let ok_base: Bool = hdm_base >= gran && (hdm_base % gran) == 0;
+    let ok_size: Bool = hdm_size >= gran && hdm_size <= 17179869184 && (hdm_size % gran) == 0;
+    return CxlHdmWindow {
+        hdm_base: if ok_base { hdm_base } else { 0 },
+        hdm_size: if ok_size { hdm_size } else { 0 },
+        coherent: if coherent < 0 || coherent > 1 { 0 } else { coherent }
+    };
+}
+
+pub fn cxl_dev_init(_pci: &PciCap, _dma: &DmaCap, port_id: Int, dev_type: Int, hdm_base: Int,
+    hdm_size: Int) -> CxlFabricDevice {
+    let gran: Int = 268435456;
+    return CxlFabricDevice {
+        port_id: if port_id < 0 || port_id > 255 { 0 } else { port_id },
+        dev_type: if dev_type != 2 && dev_type != 3 { 3 } else { dev_type },
+        hdm_base: if hdm_base < gran || (hdm_base % gran) != 0 { gran } else { hdm_base },
+        hdm_size: if hdm_size < gran || (hdm_size % gran) != 0 { gran } else { hdm_size },
+        cap_epoch: 1,
+        window_mask: 0,
+        revoked_mask: 0,
+        peer_dmas: 0,
+        epoch: 1,
+        causal_root: oo_audit_genesis()
+    };
+}
+
+pub fn cxl_window_in_hdm(dev: CxlFabricDevice, phys: Int, len: Int) -> Bool {
+    if len <= 0 || phys < dev.hdm_base { return false; }
+    return phys + len <= dev.hdm_base + dev.hdm_size;
+}
+
+pub fn cxl_map_window(dev: CxlFabricDevice, _pci: &PciCap, win: CxlHdmWindow, window_bit: Int) -> CxlFabricDevice {
+    if win.hdm_base <= 0 || win.hdm_size <= 0 || window_bit < 0 || window_bit > 7 { return dev; }
+    let bit: Int = 1 << window_bit;
+    if (dev.revoked_mask & bit) != 0 || (dev.window_mask & bit) != 0 { return dev; }
+    if cxl_window_in_hdm(dev, win.hdm_base, win.hdm_size) == false { return dev; }
+    return CxlFabricDevice {
+        port_id: dev.port_id,
+        dev_type: dev.dev_type,
+        hdm_base: dev.hdm_base,
+        hdm_size: dev.hdm_size,
+        cap_epoch: dev.cap_epoch,
+        window_mask: dev.window_mask | bit,
+        revoked_mask: dev.revoked_mask,
+        peer_dmas: dev.peer_dmas,
+        epoch: dev.epoch,
+        causal_root: oo_audit_link(dev.causal_root, bit)
+    };
+}
+
+pub fn cxl_peer_dma(dev: CxlFabricDevice, _dma: &DmaCap, src_phys: Int, dst_phys: Int,
+    len: Int) -> CxlFabricDevice {
+    if len <= 0 || len > 16777216 || src_phys == dst_phys || dev.peer_dmas < 0 || dev.peer_dmas >= 1024 {
+        return dev;
+    }
+    if cxl_window_in_hdm(dev, src_phys, len) == false || cxl_window_in_hdm(dev, dst_phys, len) == false {
+        return dev;
+    }
+    let caps: Int = (1 << oo_cap_bit_index("PciCap")) | (1 << oo_cap_bit_index("DmaCap"));
+    let parent_reg64: Int = oo_cap_reg64_pack(dev.epoch, 30, 1, caps);
+    if oo_warrant_check(parent_reg64, dev.epoch, caps, 24) == false { return dev; }
+    let turn: OodaTurn = oo_ooda_cycle(parent_reg64, dev.epoch, 24, caps, 100, src_phys, dst_phys, len, dev.dev_type,
+        dev.peer_dmas + 1, 17, 29);
+    let next_ep: Int = turn.epoch;
+    let child_reg64: Int = oo_cap_reg64_pack(next_ep, 30, 2, caps);
+    let dseal: Int = oo_delegate_seal(dev.causal_root, child_reg64, 24, 17, 29);
+    let d_ok: Bool = oo_delegate_gate(parent_reg64, child_reg64, caps, dev.epoch, next_ep, 24, dev.causal_root, dseal,
+        17, 29);
+    let ckpt: Ckpt = oo_ckpt_new(dst_phys, turn.causal_root, child_reg64);
+    let seal: Int = oo_attest_seal(child_reg64, 24, ckpt.causal_root, 17, 29);
+    let next_root: Int = oo_speculate(ckpt, next_ep, caps, 24, seal, 17, 29, len);
+    let fr: Wire = oo_wire_decode(oo_wire_encode(8, 24, child_reg64, src_phys, dst_phys, dev.port_id, next_ep,
+        next_root));
+    if turn.committed == false || d_ok == false || next_root <= ckpt.causal_root || fr.valid == false {
+        return dev;
+    }
+    return CxlFabricDevice {
+        port_id: dev.port_id,
+        dev_type: dev.dev_type,
+        hdm_base: dev.hdm_base,
+        hdm_size: dev.hdm_size,
+        cap_epoch: dev.cap_epoch,
+        window_mask: dev.window_mask,
+        revoked_mask: dev.revoked_mask,
+        peer_dmas: dev.peer_dmas + 1,
+        epoch: next_ep,
+        causal_root: next_root
+    };
+}
+
+pub fn cxl_revoke_cap(dev: CxlFabricDevice, window_bit: Int) -> CxlFabricDevice {
+    if window_bit < 0 || window_bit > 7 { return dev; }
+    let bit: Int = 1 << window_bit;
+    if (dev.window_mask & bit) == 0 { return dev; }
+    return CxlFabricDevice {
+        port_id: dev.port_id,
+        dev_type: dev.dev_type,
+        hdm_base: dev.hdm_base,
+        hdm_size: dev.hdm_size,
+        cap_epoch: dev.cap_epoch + 1,
+        window_mask: dev.window_mask & (255 - bit),
+        revoked_mask: dev.revoked_mask | bit,
+        peer_dmas: dev.peer_dmas,
+        epoch: dev.epoch,
+        causal_root: oo_audit_link(dev.causal_root, bit + 256)
+    };
+}
+
+pub fn cxl_quorum_blackbox_verify(dev: CxlFabricDevice, irq_vec: Int) -> Bool {
+    let caps: Int = (1 << oo_cap_bit_index("PciCap")) | (1 << oo_cap_bit_index("DmaCap"));
+    let vec: Int = if irq_vec < 0 || irq_vec > 255 { 0 } else { irq_vec };
+    let rights: Int = 30 | vec;
+    let v1: Int = oo_cap_reg64_pack(dev.epoch, rights, 1, caps);
+    let v2: Int = oo_cap_reg64_pack(dev.epoch, rights, 2, caps);
+    let v3: Int = oo_cap_reg64_pack(dev.epoch, rights, 3, caps);
+    let mut votes: List[Int] = list_new();
+    votes = list_push(votes, v1);
+    votes = list_push(votes, v2);
+    votes = list_push(votes, v3);
+    let qseal: Int = oo_quorum_seal(v1, 24, dev.causal_root, 17, 29);
+    let q_ok: Bool = oo_quorum_act_gate(votes, 1, v1, dev.epoch, caps, 24, dev.causal_root, qseal, 17, 29);
+    let bb_seal: Int = oo_blackbox_seal(irq_vec, v1, dev.peer_dmas + 1, dev.causal_root, 17, 29);
+    let bb_ok: Bool = oo_blackbox_replay(bb_seal, irq_vec, v1, dev.epoch, caps, dev.peer_dmas + 1, dev.causal_root,
+        17, 29);
+    return q_ok && bb_ok;
+}

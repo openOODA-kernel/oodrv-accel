@@ -1,0 +1,66 @@
+// # Kernel Subsystem State Store
+//
+// Logline: Persist and inspect real .oot state snapshots of a subsystem identity under FsWriteCap and FsReadCap.
+//
+// Setup: Declared capabilities: FsWriteCap for snapshot output, FsReadCap for directory scans.
+//
+// Beats:
+//   1. Render the deterministic .oot text form of the subsystem identity.
+//   2. Write a state snapshot through fs_mkdir_p plus fs_write_file.
+//   3. Scan the snapshot directory under FsReadCap and count its entries.
+//
+// Parent directories are created with fs_mkdir_p; every failure fails closed with a nonzero code.
+
+import "oostd/fs/os/fs.oo";
+import "core/fs/gate.oo";
+
+pub fn kstate_parent(path: String) -> String {
+    let n: Int = chars_len(path);
+    let mut cut: Int = -1;
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(path, i) == "/" { cut = i; }
+        i = i + 1;
+    }
+    if cut < 0 { return "."; }
+    if cut == 0 { return "/"; }
+    return str_slice(path, 0, cut);
+}
+
+pub fn kstate_text(name: String, version: String) -> String {
+    let mut out: String = "# kernel state v=1 persona=" + name + " ver=" + version + "\n";
+    return out;
+}
+
+pub fn kstate_write(fs_w: &FsWriteCap, path: String, name: String, version: String) -> Int {
+    if oodrv_accel_path_refused(path) {
+        return -2;
+    }
+    if chars_len(path) == 0 { return 30; }
+    let par: String = kstate_parent(path);
+    let mk: Result[Void, String] = fs_mkdir_p(fs_w, par);
+    if mk.is_err() { return 31; }
+    let wr: Result[Void, String] = fs_write_file(fs_w, path, kstate_text(name, version));
+    if wr.is_err() { return 32; }
+    return 0;
+}
+
+pub fn kstate_scan(fs_r: &FsReadCap, dir: String) -> Int {
+    if oodrv_accel_path_refused(dir) {
+        return -2;
+    }
+    if chars_len(dir) == 0 { return -1; }
+    let ents: List[String] = fs_read_dir(fs_r, dir);
+    return list_len(ents);
+}
+
+pub fn kstate_save(fs_w: &FsWriteCap, fs_r: &FsReadCap, name: String, version: String, path: String) -> Result[Int, String] {
+    let rc: Int = kstate_write(fs_w, path, name, version);
+    if rc != 0 {
+        println("ERR: save " + path + " code=" + rc.to_string() + " (fail closed)");
+        return Err("save failed");
+    }
+    let dirn: Int = kstate_scan(fs_r, kstate_parent(path));
+    println("saved state path=" + path + " entries=" + dirn.to_string());
+    return Ok(0);
+}

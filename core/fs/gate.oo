@@ -1,0 +1,46 @@
+// # oodrv-accel Path Admission Gate
+//
+// Logline: Refuses CWE-22 traversal and CWE-78 metacharacters in every path this binary reads or writes.
+// Setup: Declared capability: None. Pure string admission before any file IO.
+// Beats:
+//   1. Refuse any path that climbs with '..' per the canonical filesystem traversal law.
+//   2. Refuse a control byte (<0x20), a newline, and a shell metacharacter per byte.
+//   3. Admit the path unchanged when every check passes.
+
+import "oostd/core/primitives/byte.oo";
+import "oostd/fs/file/fs_grp/fs_invariants.oo";
+
+pub fn oodrv_accel_path_refused(path: String) -> Bool {
+    if chars_len(path) == 0 { return false; }
+    if fs_is_dotdot_traversal(path) == 1 { return true; }
+    if str_contains(path, "\n") { return true; }
+    let meta: String = ";|&$`<>";
+    let mut b: Int = 0;
+    while b < bytes_len(path) {
+        if byte_get(path, b) < 32 { return true; }
+        b = b + 1;
+    }
+    let mut i: Int = 0;
+    while i < chars_len(path) {
+        let c: String = char_at(path, i);
+        if str_contains(meta, c) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn oodrv_accel_args_refused(args: List[String]) -> Bool {
+    let mut i: Int = 0;
+    while i < list_len(args) {
+        let a: String = list_get(args, i);
+        if str_contains(a, "..") { return true; }
+        if str_contains(a, "\n") { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn oodrv_accel_refuse_traversal() -> Result[Int, String] {
+    println("ERR: refused a traversal path (fail closed)");
+    return Ok(2);
+}
