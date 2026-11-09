@@ -10,7 +10,6 @@
 import "anchor.oo";
 import "oostd/fs/os/fs.oo";
 import "core/evt_dump.oo";
-import "core/fs/gate.oo";
 import "core/fs/manifest.oo";
 import "core/fs/state.oo";
 
