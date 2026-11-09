@@ -23,20 +23,20 @@ fn expect(cond: Bool, label: String) -> Bool {
     return false;
 }
 
-fn check_driver_refusals(gpu: &GpuCap, dma: &DmaCap, mmio: &MmioCap, pci: &PciCap) -> Int {
+fn check_driver_refusals(gcap: gpu: &GpuCapGpuCap, dma: &DmaCap, mmio: &MmioCap, pci: &PciCap) -> Int {
     let mut n: Int = 0;
-    let q: GpuComputeQueue = gpu_cmdq_init(gpu, dma, mmio, 16777216, 4096, 268435456, 268435456, 256);
+    let q: GpuComputeQueue = gpu_cmdq_init(gcap, dma, mmio, 16777216, 4096, 268435456, 268435456, 256);
     let mis: GpuCmdPacket = gpu_packet_new(1, 7, 4128, 8, 8, 1, 3);
     let zero_m: GpuCmdPacket = gpu_packet_new(1, 7, 269484032, 8, 8, 1, 0);
     let oob: GpuCmdPacket = gpu_packet_new(1, 7, 4194304, 8, 8, 1, 3);
-    let q1: GpuComputeQueue = gpu_cmdq_submit(q, gpu, dma, mmio, mis);
-    let q2: GpuComputeQueue = gpu_cmdq_submit(q, gpu, dma, mmio, zero_m);
-    let q3: GpuComputeQueue = gpu_cmdq_submit(q, gpu, dma, mmio, oob);
+    let q1: GpuComputeQueue = gpu_cmdq_submit(q, gcap, dma, mmio, mis);
+    let q2: GpuComputeQueue = gpu_cmdq_submit(q, gcap, dma, mmio, zero_m);
+    let q3: GpuComputeQueue = gpu_cmdq_submit(q, gcap, dma, mmio, oob);
     if expect(mis.shader_phys == 0 && zero_m.warp_mask == 0 && q1.submitted_pkts == 0 && q2.submitted_pkts == 0 &&
         q3.submitted_pkts == 0, "01 GPU cmdq refuses misaligned shader, zero warp mask, and out-of-BAR phys") {
         n = n + 1; }
     let bop: GpuCmdPacket = gpu_packet_new(0, 0, 269484032, 0, 0, 0, 3);
-    let qc: GpuComputeQueue = gpu_cmdq_init(gpu, dma, mmio, 4096, 0, 0, 0, 3);
+    let qc: GpuComputeQueue = gpu_cmdq_init(gcap, dma, mmio, 4096, 0, 0, 0, 3);
     let qr: GpuComputeQueue = gpu_cmdq_ring_doorbell(q, mmio);
     if expect(bop.opcode_cid == 1 && bop.wg_dims == 1049601 && qc.queue_size == 256 && qc.vram_base == 268435456 &&
         qr.doorbell_rings == 0 && qr.tail == 0,
@@ -150,9 +150,9 @@ fn check_persona_refusals() -> Int {
     return n;
 }
 
-pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap, _args: List[String]) -> Result[Int, String] {
+pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gcap: gpu: &GpuCapGpuCap, pci: &PciCap, _args: List[String]) -> Result[Int, String] {
     let mut passed: Int = 0;
-    passed = passed + check_driver_refusals(gpu, dma, mmio, pci);
+    passed = passed + check_driver_refusals(gcap, dma, mmio, pci);
     passed = passed + check_engine_refusals();
     passed = passed + check_cap_and_path_refusals(fs_r, fs_w);
     passed = passed + check_persona_refusals();

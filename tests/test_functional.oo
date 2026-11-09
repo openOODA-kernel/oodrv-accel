@@ -22,17 +22,17 @@ fn expect(cond: Bool, label: String) -> Bool {
     return false;
 }
 
-fn check_gpu_and_npu(gpu: &GpuCap, dma: &DmaCap, mmio: &MmioCap) -> Int {
+fn check_gpu_and_npu(gcap: gpu: &GpuCapGpuCap, dma: &DmaCap, mmio: &MmioCap) -> Int {
     let mut n: Int = 0;
-    let q0: GpuComputeQueue = gpu_cmdq_init(gpu, dma, mmio, 16777216, 4096, 268435456, 268435456, 256);
+    let q0: GpuComputeQueue = gpu_cmdq_init(gcap, dma, mmio, 16777216, 4096, 268435456, 268435456, 256);
     let pkt: GpuCmdPacket = gpu_packet_new(1, 7, 269484032, 8, 8, 1, 4294967295);
-    let q1: GpuComputeQueue = gpu_cmdq_submit(q0, gpu, dma, mmio, pkt);
+    let q1: GpuComputeQueue = gpu_cmdq_submit(q0, gcap, dma, mmio, pkt);
     let q2: GpuComputeQueue = gpu_cmdq_complete(gpu_cmdq_ring_doorbell(q1, mmio), dma, 1);
     if expect(q2.submitted_pkts == 1 && q2.doorbell_rings == 1 && q2.completed_pkts == 1 && q2.epoch == 2 &&
         gpu_quorum_blackbox_verify(q2, 57), "01 GPU cmdq submit->doorbell->complete + quorum/blackbox trace") {
         n = n + 1; }
     let pkt2: GpuCmdPacket = gpu_packet_new(2, 9, 270532608, 4, 4, 1, 3);
-    let rt_q1: GpuComputeQueue = gpu_cmdq_submit(gpu_cmdq_submit(q0, gpu, dma, mmio, pkt), gpu, dma, mmio, pkt2);
+    let rt_q1: GpuComputeQueue = gpu_cmdq_submit(gpu_cmdq_submit(q0, gcap, dma, mmio, pkt), gcap, dma, mmio, pkt2);
     let rt_q2: GpuComputeQueue = gpu_cmdq_complete(gpu_cmdq_complete(rt_q1, dma, 1), dma, 2);
     if expect(pkt.wg_dims == ((1 << 20) | (8 << 10) | 8) && rt_q2.submitted_pkts == 2 && rt_q2.completed_pkts == 2 &&
         rt_q2.tail == 2 && rt_q2.head == 2 && gpu_vram_in_bar(q0, pkt2.shader_phys, 4096),
@@ -129,9 +129,9 @@ fn check_persona_and_theme() -> Int {
     return n;
 }
 
-pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap, _args: List[String]) -> Result[Int, String] {
+pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gcap: gpu: &GpuCapGpuCap, pci: &PciCap, _args: List[String]) -> Result[Int, String] {
     let mut passed: Int = 0;
-    passed = passed + check_gpu_and_npu(gpu, dma, mmio);
+    passed = passed + check_gpu_and_npu(gcap, dma, mmio);
     passed = passed + check_cxl_and_qat(pci, dma);
     passed = passed + check_fs_and_manifest(fs_r, fs_w);
     passed = passed + check_persona_and_theme();

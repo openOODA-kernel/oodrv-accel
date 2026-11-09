@@ -15,15 +15,15 @@ import "core/fs/manifest.oo";
 import "core/fs/state.oo";
 import "core/fs/gate.oo";
 
-fn run_accel_selftest(gpu: &GpuCap, dma: &DmaCap, mmio: &MmioCap, pci: &PciCap) -> Bool {
+fn run_accel_selftest(gcap: &GpuCap, dma: &DmaCap, mmio: &MmioCap, pci: &PciCap) -> Bool {
     let st0: AccelDrvContext = accel_init(1, 24576, 128);
     if accel_verify(st0) == false { return false; }
     let st1: AccelDrvContext = accel_step(st0, 8, 8192);
     if st1.active_items != 8 { return false; }
-    let q0: GpuComputeQueue = gpu_cmdq_init(gpu, dma, mmio, 16777216, 4096, 268435456, 268435456, 256);
+    let q0: GpuComputeQueue = gpu_cmdq_init(gcap, dma, mmio, 16777216, 4096, 268435456, 268435456, 256);
     let pkt: GpuCmdPacket = gpu_packet_new(1, 7, 269484032, 8, 8, 1, 4294967295);
     if gpu_vram_in_bar(q0, pkt.shader_phys, 4096) == false { return false; }
-    let q1: GpuComputeQueue = gpu_cmdq_submit(q0, gpu, dma, mmio, pkt);
+    let q1: GpuComputeQueue = gpu_cmdq_submit(q0, gcap, dma, mmio, pkt);
     let q2: GpuComputeQueue = gpu_cmdq_ring_doorbell(q1, mmio);
     let q3: GpuComputeQueue = gpu_cmdq_complete(q2, dma, 1);
     if q3.submitted_pkts != 1 || q3.doorbell_rings != 1 || q3.completed_pkts != 1 ||
@@ -129,7 +129,8 @@ fn run_load_mode(fs_r: &FsReadCap, p: Persona, operand: String) -> Result[Int, S
     return Ok(0);
 }
 
-pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap, args: List[String]) -> Result[Int, String] {
+pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gcap: &GpuCap, pci: &PciCap,
+    args: List[String]) -> Result[Int, String] {
     if oodrv_accel_args_refused(args) { return oodrv_accel_refuse_traversal(); }
     let argv0: String = "oodrv-accel";
     let disp: PersonaDispatch = persona_resolve(argv0, args);
@@ -154,7 +155,7 @@ pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, g
     if mode == "version" { println(p.name + " " + p.version);
     return Ok(0);
     }
-    if run_accel_selftest(gpu, dma, mmio, pci) == false { println("FAIL: " + p.name + " self-test failed");
+    if run_accel_selftest(gcap, dma, mmio, pci) == false { println("FAIL: " + p.name + " self-test failed");
     return Ok(1);
     }
     if chars_len(disp.manifest) > 0 { return run_manifest_mode(fs_r, p, disp.manifest, mode); }
