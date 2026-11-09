@@ -99,11 +99,12 @@ fn check_engine_refusals() -> Int {
 
 fn check_cap_and_path_refusals(fs_r: &FsReadCap, fs_w: &FsWriteCap) -> Int {
     let mut n: Int = 0;
-    if expect(oo_cap_reg64_check(0, 1, 3, (1 << oo_cap_bit_index("FsReadCap"))) == false,
+    let fs_bit: Int = 1 << oo_cap_bit_index("FsReadCap");
+    if expect(oo_cap_reg64_check(0, 1, 3, fs_bit) == false,
         "11 zero capability register fails closed") { n = n + 1; }
-    let stale: Int = oo_cap_reg64_pack(1, 3, 1, (1 << oo_cap_bit_index("FsReadCap")));
+    let stale: Int = oo_cap_reg64_pack(1, 3, 1, fs_bit);
     let ev_bad: AccelEvtRecovery = accel_evtdump_recover(1, 0, 4099, 2);
-    if expect(oo_cap_reg64_check(stale, 9, 3, (1 << oo_cap_bit_index("FsReadCap"))) == false &&
+    if expect(oo_cap_reg64_check(stale, 9, 3, fs_bit) == false &&
         ev_bad.admitted == false && ev_bad.digest == 0,
         "12 stale epoch and zero-register evtdump recoveries fail closed") { n = n + 1; }
     let up: String = "." + ".";
