@@ -57,7 +57,7 @@ pub fn gpu_packet_new(opcode: Int, cid: Int, shader_phys: Int, wg_x: Int, wg_y: 
     };
 }
 
-pub fn gpu_cmdq_init(_gcap: gpu: &GpuCapGpuCap, _dma: &DmaCap, _mmio: &MmioCap, ring_phys: Int, doorbell_mmio: Int,
+pub fn gpu_cmdq_init(_gcap: &GpuCap, _dma: &DmaCap, _mmio: &MmioCap, ring_phys: Int, doorbell_mmio: Int,
     vram_base: Int, vram_aperture: Int, qsize: Int) -> GpuComputeQueue {
     return GpuComputeQueue {
         qid: 0,
@@ -81,7 +81,7 @@ pub fn gpu_vram_in_bar(q: GpuComputeQueue, phys: Int, len: Int) -> Bool {
     return phys + len <= q.vram_base + q.vram_aperture;
 }
 
-pub fn gpu_cmdq_submit(q: GpuComputeQueue, _gcap: gpu: &GpuCapGpuCap, _dma: &DmaCap, _mmio: &MmioCap,
+pub fn gpu_cmdq_submit(q: GpuComputeQueue, _gcap: &GpuCap, _dma: &DmaCap, _mmio: &MmioCap,
     pkt: GpuCmdPacket) -> GpuComputeQueue {
     if q.queue_size <= 0 || q.tail < 0 || q.tail >= q.queue_size { return q; }
     if q.submitted_pkts < 0 || q.completed_pkts < 0 { return q; }

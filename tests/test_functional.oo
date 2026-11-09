@@ -22,7 +22,7 @@ fn expect(cond: Bool, label: String) -> Bool {
     return false;
 }
 
-fn check_gpu_and_npu(gcap: gpu: &GpuCapGpuCap, dma: &DmaCap, mmio: &MmioCap) -> Int {
+fn check_gpu_and_npu(gcap: &GpuCap, dma: &DmaCap, mmio: &MmioCap) -> Int {
     let mut n: Int = 0;
     let q0: GpuComputeQueue = gpu_cmdq_init(gcap, dma, mmio, 16777216, 4096, 268435456, 268435456, 256);
     let pkt: GpuCmdPacket = gpu_packet_new(1, 7, 269484032, 8, 8, 1, 4294967295);
@@ -129,7 +129,8 @@ fn check_persona_and_theme() -> Int {
     return n;
 }
 
-pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gcap: gpu: &GpuCapGpuCap, pci: &PciCap, _args: List[String]) -> Result[Int, String] {
+pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gcap: &GpuCap, pci: &PciCap,
+    _args: List[String]) -> Result[Int, String] {
     let mut passed: Int = 0;
     passed = passed + check_gpu_and_npu(gcap, dma, mmio);
     passed = passed + check_cxl_and_qat(pci, dma);
