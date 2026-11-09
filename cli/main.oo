@@ -129,8 +129,7 @@ fn run_load_mode(fs_r: &FsReadCap, p: Persona, operand: String) -> Result[Int, S
     return Ok(0);
 }
 
-pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap,
-    args: List[String]) -> Result[Int, String] {
+pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap, args: List[String]) -> Result[Int, String] {
     if oodrv_accel_args_refused(args) { return oodrv_accel_refuse_traversal(); }
     let argv0: String = "oodrv-accel";
     let disp: PersonaDispatch = persona_resolve(argv0, args);

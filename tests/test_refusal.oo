@@ -150,8 +150,7 @@ fn check_persona_refusals() -> Int {
     return n;
 }
 
-pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap,
-    _args: List[String]) -> Result[Int, String] {
+pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap, _args: List[String]) -> Result[Int, String] {
     let mut passed: Int = 0;
     passed = passed + check_driver_refusals(gpu, dma, mmio, pci);
     passed = passed + check_engine_refusals();

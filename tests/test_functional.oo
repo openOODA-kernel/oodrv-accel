@@ -129,8 +129,7 @@ fn check_persona_and_theme() -> Int {
     return n;
 }
 
-pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap,
-    _args: List[String]) -> Result[Int, String] {
+pub fn main(fs_r: &FsReadCap, fs_w: &FsWriteCap, dma: &DmaCap, mmio: &MmioCap, gpu: &GpuCap, pci: &PciCap, _args: List[String]) -> Result[Int, String] {
     let mut passed: Int = 0;
     passed = passed + check_gpu_and_npu(gpu, dma, mmio);
     passed = passed + check_cxl_and_qat(pci, dma);
