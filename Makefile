@@ -8,7 +8,7 @@ TESTBIN := bin/test_oodrv-accel
 TESTBIN2 := bin/test_oodrv-accel-refusal
 REPO_NAME := oodrv-accel
 VER := 0.6.1
-SRC := cli/main.oo anchor.oo cli/dispatch.oo cli/about.oo cli/identity.oo cli/ootheme.oo core/anchor.oo core/engine.oo core/driver_gpu_cmdq.oo core/driver_npu_mx.oo core/driver_cxl_fabric.oo core/driver_pq_qat.oo core/evt_dump.oo core/fs/anchor.oo core/fs/fsprobe.oo core/fs/gate.oo core/fs/manifest.oo core/fs/state.oo tests/test_functional.oo tests/test_refusal.oo
+SRC := cli/main.oo anchor.oo cli/dispatch.oo cli/about.oo cli/identity.oo core/anchor.oo core/engine.oo core/driver_gpu_cmdq.oo core/driver_npu_mx.oo core/driver_cxl_fabric.oo core/driver_pq_qat.oo core/evt_dump.oo core/fs/anchor.oo core/fs/fsprobe.oo core/fs/gate.oo core/fs/manifest.oo core/fs/state.oo tests/test_functional.oo tests/test_refusal.oo
 ENV := OODA_COMPILER=$(OODA_COMPILER) OODA_OODAR_ROOT=$(OODA_OODAR_ROOT) OO_LIST_AMBIENT_QUOTA=$(OO_LIST_AMBIENT_QUOTA) OODA_FS_READDIR=$(OODA_READDIR) OODA_FS_WRITEDIR=$(OODA_WRITEDIR) OODA_NO_JAIL=1
 OO_ALL := $(shell find . -name '*.oo' -not -path './.git/*' -not -path './bin/*' -not -path './.ooda-cache/*' -not -path './dist/*' -not -path './.blackbox/*' | sort)
 

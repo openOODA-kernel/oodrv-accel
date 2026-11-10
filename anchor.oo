@@ -10,6 +10,6 @@
 import "core/anchor.oo";
 import "core/fs/anchor.oo";
 import "cli/dispatch.oo";
-import "cli/ootheme.oo";
+import "oostd/core/app/ui/ootheme.oo";
 import "core/evt_dump.oo";
 import "cli/identity.oo";

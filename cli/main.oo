@@ -9,7 +9,7 @@
 
 import "anchor.oo";
 import "cli/about.oo";
-import "cli/ootheme.oo";
+import "oostd/core/app/ui/ootheme.oo";
 import "core/fs/fsprobe.oo";
 import "core/fs/manifest.oo";
 import "core/fs/state.oo";
