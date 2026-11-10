@@ -33,8 +33,7 @@ pub fn oodrv_accel_args_refused(args: List[String]) -> Bool {
     let mut i: Int = 0;
     while i < list_len(args) {
         let a: String = list_get(args, i);
-        if str_contains(a, "..") { return true; }
-        if str_contains(a, "\n") { return true; }
+        if !oo_arg_ok(a) { return true; }
         i = i + 1;
     }
     return false;
