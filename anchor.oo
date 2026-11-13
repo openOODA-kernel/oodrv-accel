@@ -1,6 +1,7 @@
 // # oodrv-accel Root Project Anchor
 //
-// Logline: oodrv-accel root module anchor re-exporting the GPU/NPU/CXL/PQ accelerator driver subsystem and multi-call dispatch pages.
+// Logline: oodrv-accel root module anchor re-exporting the GPU/NPU/CXL/PQ
+//   accelerator driver subsystem and multi-call dispatch pages.
 // Setup: Root module anchor re-exporting the component identity page.
 // Beats:
 //   1. Re-export the core subsystem anchor and persona dispatch page.

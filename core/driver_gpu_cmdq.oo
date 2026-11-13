@@ -1,6 +1,7 @@
 // # GPU Compute Command Queue & MMIO Doorbell Ring Driver
 //
-// Logline: CUDA / ROCm / Vulkan-Compute usermode submission queue with warp/wavefront capability mask validation and VRAM BAR aperture bounds guard.
+// Logline: CUDA / ROCm / Vulkan-Compute usermode submission queue with warp/wavefront
+//   capability mask validation and VRAM BAR aperture bounds guard.
 // Setup: Declared caps: GpuCap, DmaCap, MmioCap. Imports std/core/ooda.oo, std/sec/*, std/hw/ipc/wire.oo.
 // Beats:
 //   1. Declare GpuCmdPacket command descriptor and GpuComputeQueue ring structures for IOMMU-pinned GPU queues.
