@@ -106,9 +106,8 @@ fn check_cap_and_path_refusals(fs_r: &FsReadCap, fs_w: &FsWriteCap) -> Int {
     if expect(oo_cap_reg64_check(stale, 9, 3, fs_bit) == false &&
         ev_bad.admitted == false && ev_bad.digest == 0,
         "12 stale epoch and zero-register evtdump recoveries fail closed") { n = n + 1; }
-    let up: String = "." + ".";
-    let bad_s: String = "/tmp/" + up + "/etc/x.oot";
-    let bad_m: String = "/tmp/" + up + "/etc/m.txt";
+    let bad_s: String = ".." + "/cwe22_escape.oot";
+    let bad_m: String = ".." + "/cwe22_manifest.oot";
     if expect(kstate_write(fs_w, bad_s, "x", "1") != 0 &&
         accel_manifest_load(fs_r, bad_m).code == 23 &&
         accel_manifest_load(fs_r, "/tmp/oodrv_no_such_file_xyz").code == 20,

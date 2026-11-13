@@ -117,7 +117,7 @@ test: $(BIN) parity
 	@$(ENV) ./$(BIN) --json | grep -q '"status":"pass"' && echo "PASS: --json"
 	@$(ENV) ./$(BIN) --json > .ooda-cache/r1.txt && $(ENV) ./$(BIN) --json > .ooda-cache/r2.txt && cmp -s .ooda-cache/r1.txt .ooda-cache/r2.txt && echo "PASS: double-run output determinism"
 	@$(ENV) ./$(BIN) inspect /proc/version | grep -q '"kind":"file"' && echo "PASS: inspect reads a real file under FsReadCap"
-	@$(ENV) ./$(BIN) inspect /proc/self | grep -q '"kind":"dir"' && echo "PASS: inspect enumerates a real directory"
+	@$(ENV) ./$(BIN) inspect /proc/self/fd | grep -q '"kind":"dir"' && echo "PASS: inspect enumerates a real directory"
 	@$(ENV) ./$(BIN) inspect /nonexistent-ooda-probe | grep -q '"kind":"missing"' && echo "PASS: inspect classifies an absent path"
 	@$(ENV) ./$(BIN) load /proc/version | grep -q "kind=file" && echo "PASS: load prints real file content"
 	@mkdir -p .ooda-cache && printf '1 0 12 3 0\n2 1 40 25 0\n3 4 7 9 2\n' > .ooda-cache/manifest.txt && printf '1 0 12 3 0\nbad line here\n' > .ooda-cache/bad_manifest.txt

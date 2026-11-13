@@ -9,7 +9,9 @@
 //   4. Gate tile submission on a 4-phase OODA turn + checkpoint + warrant + IPC wire frame; drain completions.
 
 import "oostd/core/ooda.oo";
-import "oostd/core/math/exact/fixed_point_q32.oo";
+import "oostd/core/math/exact/fixed_point_q32/types.oo";
+import "oostd/core/math/exact/fixed_point_q32/q32.oo";
+import "oostd/core/math/exact/fixed_point_q32/q32_mul.oo";
 import "oostd/sec/capreg.oo";
 import "oostd/sec/warrant_grp/warrant.oo";
 import "oostd/sec/attest.oo";
@@ -146,12 +148,16 @@ pub fn npu_quorum_blackbox_verify(eng: NpuSystolicEngine, irq_vec: Int) -> Bool 
     let v1: Int = oo_cap_reg64_pack(eng.epoch, rights, 1, caps);
     let v2: Int = oo_cap_reg64_pack(eng.epoch, rights, 2, caps);
     let v3: Int = oo_cap_reg64_pack(eng.epoch, rights, 3, caps);
+    let v4: Int = oo_cap_reg64_pack(eng.epoch, rights, 4, caps);
+    let v5: Int = oo_cap_reg64_pack(eng.epoch, rights, 5, caps);
     let mut votes: List[Int] = list_new();
     votes = list_push(votes, v1);
     votes = list_push(votes, v2);
     votes = list_push(votes, v3);
+    votes = list_push(votes, v4);
+    votes = list_push(votes, v5);
     let qseal: Int = oo_quorum_seal(v1, 24, eng.causal_root, 17, 29);
-    let q_ok: Bool = oo_quorum_act_gate(votes, 1, v1, eng.epoch, caps, 24, eng.causal_root, qseal, 17, 29);
+    let q_ok: Bool = oo_quorum_act_gate(votes, 2, v1, eng.epoch, caps, 24, eng.causal_root, qseal, 17, 29);
     let bb_seal: Int = oo_blackbox_seal(irq_vec, v1, eng.tiles_done + eng.inflight + 1, eng.causal_root, 17, 29);
     let bb_ok: Bool = oo_blackbox_replay(bb_seal, irq_vec, v1, eng.epoch, caps, eng.tiles_done + eng.inflight + 1,
         eng.causal_root, 17, 29);

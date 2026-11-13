@@ -78,7 +78,7 @@ fn check_fs_and_manifest(fs: &FsReadCap, fs_w: &FsWriteCap) -> Int {
     let mut n: Int = 0;
     let target: String = if fs_path_exists(fs, "/proc/version") { "/proc/version" } else { "VERSION" };
     let pf: AccelFsProbe = accel_fs_probe(fs, target);
-    let pd: AccelFsProbe = accel_fs_probe(fs, "/proc/self");
+    let pd: AccelFsProbe = accel_fs_probe(fs, "/proc/self/fd");
     if expect(pf.kind == "file" && pd.kind == "dir",
         "08 FsReadCap file and directory probes") { n = n + 1; }
     let mp: String = "/tmp/oodrv_accel_manifest.txt";

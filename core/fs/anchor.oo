@@ -6,6 +6,9 @@
 // Beats:
 //   1. Export the traversal and metacharacter path admission gate.
 //   2. Export the FsReadCap probe, manifest reader, and FsWriteCap state store.
+//   3. Enforce CWE-22 fail-closed admission on every filesystem operand.
+//   4. Route all manifest and state reads through sealed capability handles.
+//   5. Separate path validation from accelerator device drivers cleanly.
 
 import "gate.oo";
 import "fsprobe.oo";

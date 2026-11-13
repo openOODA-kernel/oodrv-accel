@@ -5,6 +5,8 @@
 // Beats:
 //   1. Export the core accelerator state machine and GPU/NPU driver pages.
 //   2. Export the CXL coherent fabric, PQ crypto/compression offload, and event-dump pages.
+//   3. Enforce pure .oo capability-gated device state across all accelerator submodules.
+//   4. Keep driver modules bounded under the 8-pages-per-directory ceiling.
 
 import "engine.oo";
 import "driver_gpu_cmdq.oo";
